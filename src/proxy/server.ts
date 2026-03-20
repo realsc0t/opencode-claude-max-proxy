@@ -454,44 +454,59 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
       if (hasMultimodal) {
         // Structured messages preserve image/document/file blocks for Claude to see.
-        // The SDK only accepts role:"user" in SDKUserMessage, so assistant messages
-        // are converted to text summaries wrapped as user messages.
-        const structured = messagesToConvert.map((m: any) => {
-          if (m.role === "user") {
-            return {
-              type: "user" as const,
-              message: { role: "user" as const, content: stripCacheControl(m.content) },
-              parent_tool_use_id: null,
+        // On resume, only send user messages (SDK has assistant context already).
+        // On first request, include everything.
+        const structured: Array<{ type: "user"; message: { role: string; content: any }; parent_tool_use_id: null }> = []
+
+        if (isResume) {
+          // Resume: only send user messages from the delta (SDK has the rest)
+          for (const m of messagesToConvert) {
+            if (m.role === "user") {
+              structured.push({
+                type: "user" as const,
+                message: { role: "user" as const, content: stripCacheControl(m.content) },
+                parent_tool_use_id: null,
+              })
             }
           }
-          // Convert assistant/tool messages to text summary
-          let text: string
-          if (typeof m.content === "string") {
-            text = `[Assistant: ${m.content}]`
-          } else if (Array.isArray(m.content)) {
-            text = m.content.map((b: any) => {
-              if (b.type === "text" && b.text) return `[Assistant: ${b.text}]`
-              if (b.type === "tool_use") return `[Tool Use: ${b.name}(${JSON.stringify(b.input)})]`
-              if (b.type === "tool_result") return `[Tool Result: ${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}]`
-              return ""
-            }).filter(Boolean).join("\n")
-          } else {
-            text = `[Assistant: ${String(m.content)}]`
+        } else {
+          // First request: include system context + all messages
+          if (systemContext) {
+            structured.push({
+              type: "user" as const,
+              message: { role: "user", content: systemContext },
+              parent_tool_use_id: null,
+            })
           }
-          return {
-            type: "user" as const,
-            message: { role: "user" as const, content: text },
-            parent_tool_use_id: null,
+          for (const m of messagesToConvert) {
+            if (m.role === "user") {
+              structured.push({
+                type: "user" as const,
+                message: { role: "user" as const, content: stripCacheControl(m.content) },
+                parent_tool_use_id: null,
+              })
+            } else {
+              // Convert assistant messages to text summaries
+              let text: string
+              if (typeof m.content === "string") {
+                text = `[Assistant: ${m.content}]`
+              } else if (Array.isArray(m.content)) {
+                text = m.content.map((b: any) => {
+                  if (b.type === "text" && b.text) return `[Assistant: ${b.text}]`
+                  if (b.type === "tool_use") return `[Tool Use: ${b.name}(${JSON.stringify(b.input)})]`
+                  if (b.type === "tool_result") return `[Tool Result: ${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}]`
+                  return ""
+                }).filter(Boolean).join("\n")
+              } else {
+                text = `[Assistant: ${String(m.content)}]`
+              }
+              structured.push({
+                type: "user" as const,
+                message: { role: "user" as const, content: text },
+                parent_tool_use_id: null,
+              })
+            }
           }
-        })
-
-        // Prepend system context as a text message
-        if (systemContext) {
-          structured.unshift({
-            type: "user" as const,
-            message: { role: "user", content: systemContext },
-            parent_tool_use_id: null,
-          })
         }
 
         prompt = (async function* () { for (const msg of structured) yield msg })()
@@ -523,7 +538,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           })
           .join("\n\n") || ""
 
-        prompt = systemContext
+        // On resume, skip system context (SDK already has it)
+        prompt = (!isResume && systemContext)
           ? `${systemContext}\n\n${conversationParts}`
           : conversationParts
       }

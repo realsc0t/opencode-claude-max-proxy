@@ -55,7 +55,7 @@ mock.module("../mcpTools", () => ({
   opencodeMcpServer: { type: "sdk", name: "opencode", instance: {} },
 }))
 
-const { createProxyServer } = await import("../proxy/server")
+const { createProxyServer, clearSessionCache } = await import("../proxy/server")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -161,6 +161,7 @@ describe("Phase 2: Message format preservation", () => {
   beforeEach(() => {
     mockMessages = []
     capturedQueryParams = null
+    clearSessionCache()
   })
 
   it("should pass system prompt separately, not merged into messages", async () => {
