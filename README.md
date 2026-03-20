@@ -36,7 +36,7 @@ This project simply calls `query()` from Anthropic's public npm package using yo
 | **Concurrent requests** | Subagents and title generation don't block each other |
 | **Any Anthropic model** | Works with opus, sonnet, and haiku |
 | **Session resume** | Conversations persist across requests — faster responses, better context |
-| **Full test coverage** | 50 tests covering tool execution, streaming, subagents, sessions, and concurrency |
+| **Full test coverage** | 65 tests covering tool execution, streaming, subagents, sessions, and concurrency |
 
 ## Prerequisites
 
@@ -138,13 +138,15 @@ Claude uses these tools **internally** — the tool execution happens inside the
 
 ### Subagent Delegation
 
-When OpenCode uses the `Task` tool to delegate work to a subagent (e.g., `explore`, `oracle`, `librarian`), the proxy:
+When Claude delegates work to a subagent (e.g., `@oracle`, `@explore`, `@librarian`), the proxy uses the Claude Agent SDK's native **agents** option and **PreToolUse hook** to handle it correctly:
 
-1. **Forwards** the `Task` tool call to OpenCode (so it can manage the subagent lifecycle)
-2. **Normalizes** agent names to lowercase (Claude sometimes sends "Explore" instead of "explore")
-3. **Filters** internal MCP tool calls from the stream (OpenCode only sees tools it can handle)
+1. **Extracts** agent definitions from the Task tool description that OpenCode sends in each request
+2. **Registers** them as SDK agent definitions (with descriptions, prompts, and MCP tool access)
+3. **Fuzzy-matches** agent names via `PreToolUse` hook as a safety net (e.g., `general-purpose` → `general`, `Explore` → `explore`)
+4. **Filters** internal MCP tool calls from the stream (OpenCode only sees tools it can handle)
+5. **Blocks** external Claude Code plugins (`plugins: []`) and strips experimental env vars to prevent interference
 
-This means subagent delegation works with any agent framework (oh-my-opencode, custom agents, or OpenCode's built-in agents).
+This works automatically with any agent framework — native OpenCode (build + plan), oh-my-opencode (oracle, explore, librarian, etc.), or custom agents defined in `opencode.json`.
 
 ### Session Resume
 
@@ -232,28 +234,24 @@ launchctl load ~/Library/LaunchAgents/com.claude-max-proxy.plist
 bun test
 ```
 
-50 tests covering:
+88 tests covering:
 - Tool use forwarding (streaming and non-streaming)
 - MCP tool filtering (internal tools hidden from client)
 - Subagent concurrent request handling
-- Agent name normalization
+- Agent name fuzzy matching
+- PreToolUse hook integration
+- SDK agent definition extraction (native + oh-my-opencode)
 - Session resume (header-based and fingerprint-based)
 - Full Anthropic API tool loop simulation
 - Error recovery
 
 ## Known Limitations
 
-### Cosmetic: Duplicate Subagent Calls
+### Model Routing for Subagents
 
-When Claude delegates to a subagent (e.g., `explore`), you may briefly see a ✓ (success) followed by a ✗ (failure) for the same task in the OpenCode UI:
+All subagents run on Claude (via your Max subscription) regardless of what model is configured in oh-my-opencode. This is because the SDK's internal agent system only supports Claude models (`sonnet`, `opus`, `haiku`). Models from other providers (OpenAI, Google) configured in oh-my-opencode are mapped to `inherit` (uses the parent session's model).
 
-```
-• Find test files  Explore Agent
-✓ Find test files  Explore Agent     ← First call succeeds (proxy normalized the name)
-✗ task failed: Unknown agent type    ← SDK internal retry (proxy can't intercept this)
-```
-
-**This is cosmetic only.** The first call succeeds and returns the correct result. The second call is an internal retry from the Claude Agent SDK that the proxy cannot intercept. Claude ignores the error and uses the result from the successful first call. The final answer is always correct.
+This means your oracle agent won't use GPT-5.2, and your explore agent won't use Gemini — they'll all use Claude. The agent descriptions and prompts are preserved, just the model routing is different.
 
 ### Title Generation
 
@@ -337,15 +335,19 @@ src/
 ├── logger.ts        # Structured logging with AsyncLocalStorage context
 ├── plugin/
 │   └── claude-max-headers.ts  # OpenCode plugin for session header injection
-└── __tests__/       # 46 tests across 7 files
+└── __tests__/       # 88 tests across 12 files
     ├── helpers.ts
     ├── integration.test.ts
-    ├── proxy-agent-normalization.test.ts
+    ├── proxy-agent-definitions.test.ts
+    ├── proxy-agent-fuzzy-match.test.ts
     ├── proxy-mcp-filtering.test.ts
+    ├── proxy-pretooluse-hook.test.ts
     ├── proxy-session-resume.test.ts
+    ├── proxy-streaming-message.test.ts
     ├── proxy-subagent-support.test.ts
     ├── proxy-tool-forwarding.test.ts
-    └── proxy-transparent-tools.test.ts
+    ├── proxy-transparent-tools.test.ts
+    └── proxy-working-directory.test.ts
 ```
 
 ## License

@@ -13,6 +13,7 @@ import { opencodeMcpServer } from "../mcpTools"
 import { randomUUID, createHash } from "crypto"
 import { withClaudeLogContext } from "../logger"
 import { fuzzyMatchAgentName } from "./agentMatch"
+import { buildAgentDefinitions } from "./agentDefs"
 
 // --- Session Tracking ---
 // Maps OpenCode session ID (or fingerprint) → Claude SDK session ID
@@ -169,6 +170,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         const stream = body.stream ?? true
         const workingDirectory = process.env.CLAUDE_PROXY_WORKDIR || process.cwd()
 
+        // Strip env vars that cause SDK subprocess to load unwanted plugins/features
+        const { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, ...cleanEnv } = process.env
+
         // Session resume: look up cached Claude SDK session
         const opencodeSessionId = c.req.header("x-opencode-session")
         const cachedSession = lookupSession(opencodeSessionId, body.messages || [])
@@ -206,17 +210,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
       }
 
       // Extract available agent types from the Task tool definition.
-      // Used for: 1) prompt hint injection, 2) fuzzy matching in tool_use normalization
+      // Used for: 1) SDK agent definitions, 2) fuzzy matching in PreToolUse hook, 3) prompt hints
       let validAgentNames: string[] = []
+      let sdkAgents: Record<string, any> = {}
       if (Array.isArray(body.tools)) {
         const taskTool = body.tools.find((t: any) => t.name === "task" || t.name === "Task")
         if (taskTool?.description) {
-          const agentMatch = taskTool.description.match(/Available agent types.*?:\n((?:- \w[\w-]*:.*\n?)+)/s)
-          if (agentMatch) {
-            validAgentNames = [...agentMatch[1].matchAll(/^- (\w[\w-]*):/gm)].map(m => m[1])
-            if (validAgentNames.length > 0) {
-              systemContext += `\n\nIMPORTANT: When using the task/Task tool, the subagent_type parameter must be one of these exact values (case-sensitive, lowercase): ${validAgentNames.join(", ")}. Do NOT capitalize or modify these names.`
-            }
+          // Build SDK agent definitions from the Task tool description.
+          // This makes the SDK's native Task handler recognize agent names
+          // from OpenCode (with or without oh-my-opencode).
+          sdkAgents = buildAgentDefinitions(taskTool.description, [...ALLOWED_MCP_TOOLS])
+          validAgentNames = Object.keys(sdkAgents)
+
+          if (process.env.CLAUDE_PROXY_DEBUG) {
+            claudeLog("debug.agents", { names: validAgentNames, count: validAgentNames.length })
+          }
+          if (validAgentNames.length > 0) {
+            systemContext += `\n\nIMPORTANT: When using the task/Task tool, the subagent_type parameter must be one of these exact values (case-sensitive, lowercase): ${validAgentNames.join(", ")}. Do NOT capitalize or modify these names.`
           }
         }
       }
@@ -250,6 +260,25 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         })
         .join("\n\n") || ""
 
+      // Build PreToolUse hook to fix agent names before SDK processes them
+      const taskHook = validAgentNames.length > 0 ? {
+        PreToolUse: [{
+          matcher: "Task",
+          hooks: [async (input: any) => ({
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse" as const,
+              updatedInput: {
+                ...input.tool_input,
+                subagent_type: fuzzyMatchAgentName(
+                  String(input.tool_input?.subagent_type || ""),
+                  validAgentNames
+                ),
+              },
+            },
+          })],
+        }],
+      } : undefined
+
       // Combine system context with conversation
       const prompt = systemContext
         ? `${systemContext}\n\n${conversationParts}`
@@ -279,18 +308,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                 mcpServers: {
                   [MCP_SERVER_NAME]: opencodeMcpServer
                 },
+                plugins: [], // Prevent external plugins (e.g., oh-my-claudecode) from interfering
+                env: cleanEnv,
+                ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
                 ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-                canUseTool: async (toolName: string) => {
-                  if (toolName === "Task" || toolName === "task") {
-                    return {
-                      behavior: "deny" as const,
-                      message: "Task delegation is handled by the client. Returning tool_use to client.",
-                    }
-                  }
-                  return {
-                    behavior: "allow" as const,
-                  }
-                },
+                ...(taskHook ? { hooks: taskHook } : {}),
               }
             })
 
@@ -313,14 +335,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                 // Preserve ALL content blocks (text, tool_use, thinking, etc.)
                 for (const block of message.message.content) {
                   const b = block as Record<string, unknown>
-                  // Normalize task tool_use: fuzzy match subagent_type to valid agent names
-                  if (b.type === "tool_use" && typeof b.name === "string" &&
-                      (b.name === "task" || b.name === "Task") &&
-                      b.input && typeof (b.input as any).subagent_type === "string") {
-                    (b.input as any).subagent_type = fuzzyMatchAgentName(
-                      (b.input as any).subagent_type, validAgentNames
-                    )
-                  }
                   contentBlocks.push(b)
                 }
               }
@@ -427,7 +441,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                 prompt,
                 options: {
                   maxTurns: 100,
-                cwd: workingDirectory,
+                  cwd: workingDirectory,
                   model,
                   pathToClaudeCodeExecutable: claudeExecutable,
                   includePartialMessages: true,
@@ -438,18 +452,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                   mcpServers: {
                     [MCP_SERVER_NAME]: opencodeMcpServer
                   },
+                  plugins: [], // Prevent external plugins from interfering
+                  env: cleanEnv,
+                  ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
                   ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-                  canUseTool: async (toolName: string) => {
-                    if (toolName === "Task" || toolName === "task") {
-                      return {
-                        behavior: "deny" as const,
-                        message: "Task delegation is handled by the client. Returning tool_use to client.",
-                      }
-                    }
-                    return {
-                      behavior: "allow" as const,
-                    }
-                  },
+                  ...(taskHook ? { hooks: taskHook } : {}),
                 }
               })
 
@@ -474,7 +481,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               }, 15_000)
 
               const skipBlockIndices = new Set<number>()
-              const taskBlockIndices = new Set<number>() // Track task tool blocks for agent name normalization
               let messageStartEmitted = false // Track if we've sent a message_start to the client
 
               try {
@@ -529,10 +535,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                           if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
                           continue
                         }
-                        // Track task tool blocks for agent name normalization
-                        if ((block.name === "task" || block.name === "Task") && eventIndex !== undefined) {
-                          taskBlockIndices.add(eventIndex)
-                        }
+
                       }
                     }
 
@@ -551,29 +554,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                       }
                     }
 
-                    // Normalize agent names in task tool input_json_delta events
-                    let eventToForward = event
-                    if (eventType === "content_block_delta" && eventIndex !== undefined &&
-                        taskBlockIndices.has(eventIndex)) {
-                      const delta = (event as any).delta
-                      if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
-                        // Fuzzy match subagent_type to valid agent names
-                        const normalized = delta.partial_json.replace(
-                          /("subagent_type"\s*:\s*")([^"]+)(")/g,
-                          (_: string, pre: string, name: string, post: string) =>
-                            `${pre}${fuzzyMatchAgentName(name, validAgentNames)}${post}`
-                        )
-                        if (normalized !== delta.partial_json) {
-                          eventToForward = {
-                            ...event,
-                            delta: { ...delta, partial_json: normalized }
-                          }
-                        }
-                      }
-                    }
-
                     // Forward all other events (text, non-MCP tool_use like Task, message events)
-                    const payload = encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(eventToForward)}\n\n`)
+                    const payload = encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(event)}\n\n`)
                     if (!safeEnqueue(payload, `stream_event:${eventType}`)) {
                       break
                     }
