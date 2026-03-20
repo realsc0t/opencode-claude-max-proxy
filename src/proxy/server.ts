@@ -188,26 +188,29 @@ const BLOCKED_BUILTIN_TOOLS = [
   "WebFetch", "WebSearch", "TodoWrite"
 ]
 
-// Tools that only exist in Claude Code, not in OpenCode.
-// Block these in passthrough mode so Claude never generates tool_use for them.
-// Full list from Claude Code SDK 0.2.80 — OpenCode has its own equivalents
-// for Read/Write/Edit/Bash/Glob/Grep but not these:
+// Claude Code SDK tools that have NO equivalent in OpenCode.
+// Only block these — everything else either has an OpenCode equivalent
+// or is handled by OpenCode's own tool system.
+//
+// Mapping of Claude Code → OpenCode equivalents (NOT blocked):
+//   AskUserQuestion → question        (OpenCode has this!)
+//   TodoWrite       → todowrite       (OpenCode has this!)
+//   TaskOutput      → background_output
+//   TaskStop        → background_cancel
+//   Skill           → skill / skill_mcp / slashcommand
+//   Agent           → delegate_task / task
+//
+// These truly have NO OpenCode equivalent (BLOCKED):
 const CLAUDE_CODE_ONLY_TOOLS = [
-  "AskUserQuestion",   // Claude Code interactive Q&A (no OpenCode equivalent)
-  "Skill",             // Claude Code skill system
-  "ToolSearch",        // Claude Code deferred tool loading
-  "TodoWrite",         // Claude Code todo system
-  "TaskOutput",        // Claude Code background task output
-  "TaskStop",          // Claude Code background task management
+  "ToolSearch",        // Claude Code deferred tool loading (internal mechanism)
   "CronCreate",        // Claude Code cron jobs
   "CronDelete",        // Claude Code cron jobs
   "CronList",          // Claude Code cron jobs
-  "EnterPlanMode",     // Claude Code mode switching (OpenCode has its own)
+  "EnterPlanMode",     // Claude Code mode switching (OpenCode uses plan agent instead)
   "ExitPlanMode",      // Claude Code mode switching
   "EnterWorktree",     // Claude Code git worktree management
   "ExitWorktree",      // Claude Code git worktree management
   "NotebookEdit",      // Jupyter notebook editing
-  "Agent",             // Claude Code's native agent launcher (we use Task instead)
 ]
 
 const MCP_SERVER_NAME = "opencode"
@@ -368,6 +371,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         }
       }
 
+
+
       // When resuming, only send the last user message (SDK already has history)
       const messagesToConvert = isResume
         ? getLastUserMessage(body.messages || [])
@@ -403,6 +408,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
       // (e.g., oracle on GPT-5.2, explore on Gemini via oh-my-opencode).
       const passthrough = Boolean(process.env.CLAUDE_PROXY_PASSTHROUGH)
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
+
+
 
       // In passthrough mode: block ALL tools, capture them for forwarding
       // In normal mode: only fix agent names on Task tool
