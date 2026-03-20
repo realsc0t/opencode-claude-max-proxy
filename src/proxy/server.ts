@@ -119,6 +119,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         }
       }
 
+      // Extract available agent types from the Task tool definition and inject as a hint.
+      // This prevents Claude from guessing wrong agent names (e.g., "Explore" instead of "explore").
+      if (Array.isArray(body.tools)) {
+        const taskTool = body.tools.find((t: any) => t.name === "task" || t.name === "Task")
+        if (taskTool?.description) {
+          const agentMatch = taskTool.description.match(/Available agent types.*?:\n((?:- \w[\w-]*:.*\n?)+)/s)
+          if (agentMatch) {
+            const agentNames = [...agentMatch[1].matchAll(/^- (\w[\w-]*):/gm)].map(m => m[1])
+            if (agentNames.length > 0) {
+              systemContext += `\n\nIMPORTANT: When using the task/Task tool, the subagent_type parameter must be one of these exact values (case-sensitive, lowercase): ${agentNames.join(", ")}. Do NOT capitalize or modify these names.`
+            }
+          }
+        }
+      }
+
       // Convert messages to a text prompt, preserving all content types
       const conversationParts = body.messages
         ?.map((m: { role: string; content: string | Array<{ type: string; text?: string; content?: string; tool_use_id?: string; name?: string; input?: unknown; id?: string }> }) => {
