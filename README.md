@@ -59,9 +59,17 @@ No monkey-patching. No forked SDKs. No fragile stream rewriting. Just a hook and
 
 1. **Claude Max subscription** — [Subscribe here](https://claude.ai/settings/subscription)
 2. **Claude CLI** authenticated: `npm install -g @anthropic-ai/claude-code && claude login`
-3. **Bun** runtime: `curl -fsSL https://bun.sh/install | bash`
 
-### Install & Run
+### Option A: npm Install
+
+```bash
+npm install -g opencode-claude-max-proxy
+
+# Start in passthrough mode (recommended)
+CLAUDE_PROXY_PASSTHROUGH=1 claude-max-proxy
+```
+
+### Option B: From Source
 
 ```bash
 git clone https://github.com/rynfar/opencode-claude-max-proxy
@@ -71,6 +79,26 @@ bun install
 # Start in passthrough mode (recommended)
 CLAUDE_PROXY_PASSTHROUGH=1 bun run proxy
 ```
+
+> **Note:** Running from source requires [Bun](https://bun.sh): `curl -fsSL https://bun.sh/install | bash`
+
+### Option C: Docker
+
+```bash
+git clone https://github.com/rynfar/opencode-claude-max-proxy
+cd opencode-claude-max-proxy
+
+# Start the container
+docker compose up -d
+
+# Login to Claude inside the container (one-time)
+docker compose exec proxy claude login
+
+# Verify
+curl http://127.0.0.1:3456/health
+```
+
+> **Note:** On macOS, `claude login` must be run inside the container (keychain credentials can't be mounted). On Linux, volume-mounting `~/.claude` may work without re-login.
 
 ### Connect OpenCode
 

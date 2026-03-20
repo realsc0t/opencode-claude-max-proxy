@@ -1,0 +1,18 @@
+services:
+  proxy:
+    build: .
+    user: "claude"
+    ports:
+      - "3456:3456"
+    volumes:
+      - ~/.claude:/home/claude/.claude
+      - ~/.claude/.claude.json:/home/claude/.claude.json
+    environment:
+      - CLAUDE_PROXY_PASSTHROUGH=1
+      - CLAUDE_PROXY_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3456/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
