@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.12.0](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.11.2...v1.12.0) (2026-03-21)
+
+
+### Features
+
+* add build pipeline for npm publishing, remove runtime Bun dependency ([4f62897](https://github.com/rynfar/opencode-claude-max-proxy/commit/4f6289729608dad3bcf9e89833bc59506fe89efa))
+
+
+### Bug Fixes
+
+* restore concurrency queue, idle timeout, and Docker crash recovery ([7270b47](https://github.com/rynfar/opencode-claude-max-proxy/commit/7270b47451c0a6859ab815df1df0b1def4583842))
+
 ## [1.11.2](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.11.1...v1.11.2) (2026-03-20)
 
 
