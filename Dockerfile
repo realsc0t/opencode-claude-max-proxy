@@ -2,7 +2,7 @@
 FROM oven/bun:1 AS build
 
 WORKDIR /app
-COPY package.json bun.lock* tsconfig.json ./
+COPY package.json bun.lock* tsconfig.json* ./
 COPY bin/ ./bin/
 COPY src/ ./src/
 
