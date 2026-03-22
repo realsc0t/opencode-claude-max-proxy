@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.12.2](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.12.1...v1.12.2) (2026-03-22)
+
+
+### Bug Fixes
+
+* pass OpenCode system prompt via SDK appendSystemPrompt ([1375a7e](https://github.com/rynfar/opencode-claude-max-proxy/commit/1375a7ed32740cca5e7fc25397e7ac5f79d9e8e8))
+* pass OpenCode system prompt via SDK appendSystemPrompt ([9ff630c](https://github.com/rynfar/opencode-claude-max-proxy/commit/9ff630c0dca72525cc157652a4c2409c2e9d1e84)), closes [#74](https://github.com/rynfar/opencode-claude-max-proxy/issues/74)
+* **proxy:** add LRU eviction to bound session cache growth ([661f007](https://github.com/rynfar/opencode-claude-max-proxy/commit/661f007300fd5ea1893a1147f3761021efd9318f))
+* **proxy:** add LRU eviction to bound session cache growth ([93d7959](https://github.com/rynfar/opencode-claude-max-proxy/commit/93d7959ffbfce0d44312f3d1cc4325fabfdf028a))
+* **proxy:** convert blocking execSync calls to async ([fb79545](https://github.com/rynfar/opencode-claude-max-proxy/commit/fb795457649653375a5122d9e3deebb8d86251df))
+* **proxy:** convert blocking execSync calls to async ([e59637f](https://github.com/rynfar/opencode-claude-max-proxy/commit/e59637f04728cafc5845a872c22bd7504723d9d5))
+* **session-store:** add file locking and error logging ([b996a81](https://github.com/rynfar/opencode-claude-max-proxy/commit/b996a81a8b8e9cb4775b584358ae16baa6aae6e8))
+* **session-store:** add file locking for concurrent access safety ([10c9a3c](https://github.com/rynfar/opencode-claude-max-proxy/commit/10c9a3c047978fe2e98d291254919bd992461218))
+
 ## [1.12.1](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.12.0...v1.12.1) (2026-03-21)
 
 
