@@ -114,8 +114,10 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000)
 
-/** Hash the first user message to fingerprint a conversation */
-function getConversationFingerprint(messages: Array<{ role: string; content: any }>): string {
+/** Hash the first user message + system context to fingerprint a conversation.
+ *  Including system context prevents cross-project collisions when different
+ *  projects happen to start with the same first message. */
+function getConversationFingerprint(messages: Array<{ role: string; content: any }>, systemContext?: string): string {
   const firstUser = messages?.find((m) => m.role === "user")
   if (!firstUser) return ""
   const text = typeof firstUser.content === "string"
@@ -124,7 +126,8 @@ function getConversationFingerprint(messages: Array<{ role: string; content: any
       ? firstUser.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
       : ""
   if (!text) return ""
-  return createHash("sha256").update(text.slice(0, 2000)).digest("hex").slice(0, 16)
+  const seed = systemContext ? `${systemContext}\n${text.slice(0, 2000)}` : text.slice(0, 2000)
+  return createHash("sha256").update(seed).digest("hex").slice(0, 16)
 }
 
 /**
@@ -177,14 +180,12 @@ function verifyLineage(
 /** Look up a cached session by header or fingerprint */
 function lookupSession(
   opencodeSessionId: string | undefined,
-  messages: Array<{ role: string; content: any }>
+  messages: Array<{ role: string; content: any }>,
+  systemContext?: string
 ): SessionState | undefined {
-  // When a session ID is provided, only match by that ID — don't fall through
-  // to fingerprint. A different session ID means a different session.
   if (opencodeSessionId) {
     const cached = sessionCache.get(opencodeSessionId)
     if (cached) return verifyLineage(cached, messages, opencodeSessionId, sessionCache)
-    // Check shared file store
     const shared = lookupSharedSession(opencodeSessionId)
     if (shared) {
       const state: SessionState = {
@@ -193,7 +194,6 @@ function lookupSession(
         messageCount: shared.messageCount || 0,
         lineageHash: shared.lineageHash || "",
       }
-      // Verify lineage before caching
       const verified = verifyLineage(state, messages, opencodeSessionId, sessionCache)
       if (verified) sessionCache.set(opencodeSessionId, state)
       return verified
@@ -201,8 +201,7 @@ function lookupSession(
     return undefined
   }
 
-  // No session ID — use fingerprint fallback
-  const fp = getConversationFingerprint(messages)
+  const fp = getConversationFingerprint(messages, systemContext)
   if (fp) {
     const cached = fingerprintCache.get(fp)
     if (cached) return verifyLineage(cached, messages, fp, fingerprintCache)
@@ -511,9 +510,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         // Strip env vars that cause SDK subprocess to load unwanted plugins/features
         const { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, ...cleanEnv } = process.env
 
+        let systemContext = ""
+        if (body.system) {
+          if (typeof body.system === "string") {
+            systemContext = body.system
+          } else if (Array.isArray(body.system)) {
+            systemContext = body.system
+              .filter((b: any) => b.type === "text" && b.text)
+              .map((b: any) => b.text)
+              .join("\n")
+          }
+        }
+
         // Session resume: look up cached Claude SDK session
         const opencodeSessionId = c.req.header("x-opencode-session")
-        const cachedSession = lookupSession(opencodeSessionId, body.messages || [])
+        const cachedSession = lookupSession(opencodeSessionId, body.messages || [], systemContext)
         const resumeSessionId = cachedSession?.claudeSessionId
         const isResume = Boolean(resumeSessionId)
 
@@ -533,19 +544,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           messageCount: Array.isArray(body.messages) ? body.messages.length : 0,
           hasSystemPrompt: Boolean(body.system)
         })
-
-      // Build system context from the request's system prompt
-      let systemContext = ""
-      if (body.system) {
-        if (typeof body.system === "string") {
-          systemContext = body.system
-        } else if (Array.isArray(body.system)) {
-          systemContext = body.system
-            .filter((b: any) => b.type === "text" && b.text)
-            .map((b: any) => b.text)
-            .join("\n")
-        }
-      }
 
       // Extract available agent types from the Task tool definition.
       // Used for: 1) SDK agent definitions, 2) fuzzy matching in PreToolUse hook, 3) prompt hints
@@ -901,13 +899,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           })
 
           // Store session for future resume
-          if (currentSessionId) {
-            storeSession(opencodeSessionId, body.messages || [], currentSessionId)
-          }
+              if (currentSessionId) {
+                storeSession(opencodeSessionId, body.messages || [], currentSessionId, systemContext)
+              }
 
-          const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`
+              const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`
 
-          return new Response(JSON.stringify({
+              return new Response(JSON.stringify({
             id: `msg_${Date.now()}`,
             type: "message",
             role: "assistant",
