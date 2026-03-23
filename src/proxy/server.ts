@@ -225,7 +225,8 @@ function lookupSession(
 function storeSession(
   opencodeSessionId: string | undefined,
   messages: Array<{ role: string; content: any }>,
-  claudeSessionId: string
+  claudeSessionId: string,
+  systemContext?: string
 ) {
   if (!claudeSessionId) return
   const lineageHash = computeLineageHash(messages)
@@ -237,7 +238,7 @@ function storeSession(
   }
   // In-memory cache
   if (opencodeSessionId) sessionCache.set(opencodeSessionId, state)
-  const fp = getConversationFingerprint(messages)
+  const fp = getConversationFingerprint(messages, systemContext)
   if (fp) fingerprintCache.set(fp, state)
   // Shared file store (cross-proxy resume)
   const key = opencodeSessionId || fp
@@ -1124,7 +1125,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
               // Store session for future resume
               if (currentSessionId) {
-                storeSession(opencodeSessionId, body.messages || [], currentSessionId)
+                storeSession(opencodeSessionId, body.messages || [], currentSessionId, systemContext)
               }
 
               if (!streamClosed) {
