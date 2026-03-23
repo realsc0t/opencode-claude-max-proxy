@@ -37,7 +37,14 @@ export async function runCli(
     console.error("\x1b[33m⚠ Could not verify Claude auth status. If requests fail, run: claude login\x1b[0m")
   }
 
-  await start({ port, host, idleTimeoutSeconds })
+  const proxy = await start({ port, host, idleTimeoutSeconds })
+
+  // Handle EADDRINUSE — preserve CLI behavior of exiting on port conflict
+  proxy.server.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      process.exit(1)
+    }
+  })
 }
 
 if (import.meta.main) {

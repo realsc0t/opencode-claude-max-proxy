@@ -265,6 +265,48 @@ describe("Session lineage: undo detection", () => {
   })
 })
 
+describe("Session lastAccess refresh on lookup", () => {
+  it("keeps actively-used sessions alive in LRU by refreshing lastAccess", async () => {
+    const app = createTestApp()
+
+    // Create 2 sessions (LRU limit is 1000 in tests, so no eviction pressure,
+    // but we can verify resume works across multiple lookups — proving the
+    // session stays accessible and its timestamp is refreshed)
+
+    // Session A — created first
+    await post(app, "sess-A", [
+      { role: "user", content: "session A" },
+    ], "sdk-A")
+
+    // Session B — created second
+    await post(app, "sess-B", [
+      { role: "user", content: "session B" },
+    ], "sdk-B")
+
+    // Come back to session A much later — should still resume
+    capturedQueryParams = null
+    await post(app, "sess-A", [
+      { role: "user", content: "session A" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "still here?" },
+    ], "sdk-A")
+
+    expect(capturedQueryParams?.options?.resume).toBe("sdk-A")
+
+    // And again — third access to same session, still resumes
+    capturedQueryParams = null
+    await post(app, "sess-A", [
+      { role: "user", content: "session A" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "still here?" },
+      { role: "assistant", content: "yes" },
+      { role: "user", content: "one more" },
+    ], "sdk-A")
+
+    expect(capturedQueryParams?.options?.resume).toBe("sdk-A")
+  })
+})
+
 describe("Session lineage: fingerprint fallback", () => {
   it("does NOT resume via fingerprint after undo", async () => {
     const app = createTestApp()

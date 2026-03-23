@@ -33,8 +33,19 @@ export interface StoredSession {
   lineageHash?: string
 }
 
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+// No time-based session expiry. SDK sessions persist on Anthropic's side
+// for weeks — discarding our mapping just forces a destructive flat-text
+// replay on the next request. Storage is bounded by MAX_STORED_SESSIONS.
+const DEFAULT_MAX_STORED_SESSIONS = 10_000
 const STALE_LOCK_THRESHOLD_MS = 30_000
+
+function getMaxStoredSessions(): number {
+  const raw = process.env.CLAUDE_PROXY_MAX_STORED_SESSIONS
+  if (!raw) return DEFAULT_MAX_STORED_SESSIONS
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_STORED_SESSIONS
+  return parsed
+}
 
 function acquireLock(lockPath: string): boolean {
   try {
@@ -87,16 +98,7 @@ function readStore(): Record<string, StoredSession> {
   if (!existsSync(path)) return {}
   try {
     const data = readFileSync(path, "utf-8")
-    const store = JSON.parse(data) as Record<string, StoredSession>
-    // Prune expired entries
-    const now = Date.now()
-    const pruned: Record<string, StoredSession> = {}
-    for (const [key, session] of Object.entries(store)) {
-      if (now - session.lastUsedAt < SESSION_TTL_MS) {
-        pruned[key] = session
-      }
-    }
-    return pruned
+    return JSON.parse(data) as Record<string, StoredSession>
   } catch (e) {
     console.error("[sessionStore] read failed:", (e as Error).message)
     return {}
@@ -122,10 +124,7 @@ function writeStore(store: Record<string, StoredSession>): void {
 
 export function lookupSharedSession(key: string): StoredSession | undefined {
   const store = readStore()
-  const session = store[key]
-  if (!session) return undefined
-  if (Date.now() - session.lastUsedAt >= SESSION_TTL_MS) return undefined
-  return session
+  return store[key]
 }
 
 export function storeSharedSession(key: string, claudeSessionId: string, messageCount?: number, lineageHash?: string): void {
@@ -145,6 +144,18 @@ export function storeSharedSession(key: string, claudeSessionId: string, message
       messageCount: messageCount ?? existing?.messageCount ?? 0,
       lineageHash: lineageHash ?? existing?.lineageHash,
     }
+
+    // Prune oldest entries if over capacity (count-based, not time-based)
+    const maxEntries = getMaxStoredSessions()
+    const keys = Object.keys(store)
+    if (keys.length > maxEntries) {
+      const sorted = keys.sort((a, b) => (store[a]!.lastUsedAt || 0) - (store[b]!.lastUsedAt || 0))
+      const toRemove = sorted.slice(0, keys.length - maxEntries)
+      for (const k of toRemove) {
+        delete store[k]
+      }
+    }
+
     writeStore(store)
   } finally {
     if (hasLock) {

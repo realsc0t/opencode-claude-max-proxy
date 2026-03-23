@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.13.6](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.5...v1.13.6) (2026-03-23)
+
+
+### Bug Fixes
+
+* replace time-based session TTL with durable count-bounded storage ([121e82d](https://github.com/rynfar/opencode-claude-max-proxy/commit/121e82d95b6b84f3b6ad46d116cdc6ee8bdfe029))
+* replace time-based session TTL with durable count-bounded storage ([71b2cc7](https://github.com/rynfar/opencode-claude-max-proxy/commit/71b2cc7661f407c827a43b5cc1f66885c7d25041)), closes [#99](https://github.com/rynfar/opencode-claude-max-proxy/issues/99)
+
+## [1.13.5](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.4...v1.13.5) (2026-03-23)
+
+
+### Bug Fixes
+
+* remove duplicate cleanup timer and stop re-throwing in error event handler ([ae7404a](https://github.com/rynfar/opencode-claude-max-proxy/commit/ae7404af675599de2ce4159bf82ed148b6104bb8))
+
+## [1.13.4](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.3...v1.13.4) (2026-03-23)
+
+
+### Bug Fixes
+
+* pass systemContext to storeSession for consistent fingerprinting ([055b025](https://github.com/rynfar/opencode-claude-max-proxy/commit/055b02571c985c979c90deb491894b863fa9832d))
+* pass systemContext to storeSession for consistent fingerprinting ([617530d](https://github.com/rynfar/opencode-claude-max-proxy/commit/617530daa216daa916d72c5a612c8ee574ceff74))
+
+## [1.13.3](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.2...v1.13.3) (2026-03-23)
+
+
+### Bug Fixes
+
+* prevent cross-project session contamination in fingerprint cache ([93ef050](https://github.com/rynfar/opencode-claude-max-proxy/commit/93ef05030825f2668e49063d5991e188af483f5f))
+
 ## [1.13.2](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.1...v1.13.2) (2026-03-23)
 
 

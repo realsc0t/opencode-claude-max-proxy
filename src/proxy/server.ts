@@ -4,8 +4,9 @@ import { serve } from "@hono/node-server"
 import type { Server } from "node:http"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
-import type { ProxyConfig } from "./types"
 import { DEFAULT_PROXY_CONFIG } from "./types"
+import type { ProxyConfig, ProxyInstance } from "./types"
+export type { ProxyConfig, ProxyInstance }
 import { claudeLog } from "../logger"
 import { exec as execCallback } from "child_process"
 import { existsSync } from "fs"
@@ -102,20 +103,15 @@ export function clearSessionCache() {
   try { clearSharedSessions() } catch {}
 }
 
-// Clean stale sessions every hour — sessions survive a full workday
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, val] of sessionCache) {
-    if (now - val.lastAccess > SESSION_TTL_MS) sessionCache.delete(key)
-  }
-  for (const [key, val] of fingerprintCache) {
-    if (now - val.lastAccess > SESSION_TTL_MS) fingerprintCache.delete(key)
-  }
-}, 60 * 60 * 1000)
+// No time-based session eviction. The in-memory LRU caches (bounded by
+// MAX_SESSIONS) handle memory pressure. The file store (sessionStore.ts)
+// uses count-based pruning. SDK sessions persist on Anthropic's side for
+// weeks — we should never discard a valid mapping before the SDK does.
 
-/** Hash the first user message to fingerprint a conversation */
-function getConversationFingerprint(messages: Array<{ role: string; content: any }>): string {
+/** Hash the first user message + system context to fingerprint a conversation.
+ *  Including system context prevents cross-project collisions when different
+ *  projects happen to start with the same first message. */
+function getConversationFingerprint(messages: Array<{ role: string; content: any }>, systemContext?: string): string {
   const firstUser = messages?.find((m) => m.role === "user")
   if (!firstUser) return ""
   const text = typeof firstUser.content === "string"
@@ -124,7 +120,8 @@ function getConversationFingerprint(messages: Array<{ role: string; content: any
       ? firstUser.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
       : ""
   if (!text) return ""
-  return createHash("sha256").update(text.slice(0, 2000)).digest("hex").slice(0, 16)
+  const seed = systemContext ? `${systemContext}\n${text.slice(0, 2000)}` : text.slice(0, 2000)
+  return createHash("sha256").update(seed).digest("hex").slice(0, 16)
 }
 
 /**
@@ -174,26 +171,32 @@ function verifyLineage(
   return cached
 }
 
+/** Refresh lastAccess on a verified session so LRU eviction reflects actual usage */
+function touchSession(state: SessionState): SessionState {
+  state.lastAccess = Date.now()
+  return state
+}
+
 /** Look up a cached session by header or fingerprint */
 function lookupSession(
   opencodeSessionId: string | undefined,
-  messages: Array<{ role: string; content: any }>
+  messages: Array<{ role: string; content: any }>,
+  systemContext?: string
 ): SessionState | undefined {
-  // When a session ID is provided, only match by that ID — don't fall through
-  // to fingerprint. A different session ID means a different session.
   if (opencodeSessionId) {
     const cached = sessionCache.get(opencodeSessionId)
-    if (cached) return verifyLineage(cached, messages, opencodeSessionId, sessionCache)
-    // Check shared file store
+    if (cached) {
+      const verified = verifyLineage(cached, messages, opencodeSessionId, sessionCache)
+      return verified ? touchSession(verified) : undefined
+    }
     const shared = lookupSharedSession(opencodeSessionId)
     if (shared) {
       const state: SessionState = {
         claudeSessionId: shared.claudeSessionId,
-        lastAccess: shared.lastUsedAt,
+        lastAccess: Date.now(),
         messageCount: shared.messageCount || 0,
         lineageHash: shared.lineageHash || "",
       }
-      // Verify lineage before caching
       const verified = verifyLineage(state, messages, opencodeSessionId, sessionCache)
       if (verified) sessionCache.set(opencodeSessionId, state)
       return verified
@@ -201,16 +204,18 @@ function lookupSession(
     return undefined
   }
 
-  // No session ID — use fingerprint fallback
-  const fp = getConversationFingerprint(messages)
+  const fp = getConversationFingerprint(messages, systemContext)
   if (fp) {
     const cached = fingerprintCache.get(fp)
-    if (cached) return verifyLineage(cached, messages, fp, fingerprintCache)
+    if (cached) {
+      const verified = verifyLineage(cached, messages, fp, fingerprintCache)
+      return verified ? touchSession(verified) : undefined
+    }
     const shared = lookupSharedSession(fp)
     if (shared) {
       const state: SessionState = {
         claudeSessionId: shared.claudeSessionId,
-        lastAccess: shared.lastUsedAt,
+        lastAccess: Date.now(),
         messageCount: shared.messageCount || 0,
         lineageHash: shared.lineageHash || "",
       }
@@ -226,7 +231,8 @@ function lookupSession(
 function storeSession(
   opencodeSessionId: string | undefined,
   messages: Array<{ role: string; content: any }>,
-  claudeSessionId: string
+  claudeSessionId: string,
+  systemContext?: string
 ) {
   if (!claudeSessionId) return
   const lineageHash = computeLineageHash(messages)
@@ -238,7 +244,7 @@ function storeSession(
   }
   // In-memory cache
   if (opencodeSessionId) sessionCache.set(opencodeSessionId, state)
-  const fp = getConversationFingerprint(messages)
+  const fp = getConversationFingerprint(messages, systemContext)
   if (fp) fingerprintCache.set(fp, state)
   // Shared file store (cross-proxy resume)
   const key = opencodeSessionId || fp
@@ -511,9 +517,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         // Strip env vars that cause SDK subprocess to load unwanted plugins/features
         const { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, ...cleanEnv } = process.env
 
+        let systemContext = ""
+        if (body.system) {
+          if (typeof body.system === "string") {
+            systemContext = body.system
+          } else if (Array.isArray(body.system)) {
+            systemContext = body.system
+              .filter((b: any) => b.type === "text" && b.text)
+              .map((b: any) => b.text)
+              .join("\n")
+          }
+        }
+
         // Session resume: look up cached Claude SDK session
         const opencodeSessionId = c.req.header("x-opencode-session")
-        const cachedSession = lookupSession(opencodeSessionId, body.messages || [])
+        const cachedSession = lookupSession(opencodeSessionId, body.messages || [], systemContext)
         const resumeSessionId = cachedSession?.claudeSessionId
         const isResume = Boolean(resumeSessionId)
 
@@ -533,19 +551,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           messageCount: Array.isArray(body.messages) ? body.messages.length : 0,
           hasSystemPrompt: Boolean(body.system)
         })
-
-      // Build system context from the request's system prompt
-      let systemContext = ""
-      if (body.system) {
-        if (typeof body.system === "string") {
-          systemContext = body.system
-        } else if (Array.isArray(body.system)) {
-          systemContext = body.system
-            .filter((b: any) => b.type === "text" && b.text)
-            .map((b: any) => b.text)
-            .join("\n")
-        }
-      }
 
       // Extract available agent types from the Task tool definition.
       // Used for: 1) SDK agent definitions, 2) fuzzy matching in PreToolUse hook, 3) prompt hints
@@ -901,13 +906,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           })
 
           // Store session for future resume
-          if (currentSessionId) {
-            storeSession(opencodeSessionId, body.messages || [], currentSessionId)
-          }
+              if (currentSessionId) {
+                storeSession(opencodeSessionId, body.messages || [], currentSessionId, systemContext)
+              }
 
-          const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`
+              const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`
 
-          return new Response(JSON.stringify({
+              return new Response(JSON.stringify({
             id: `msg_${Date.now()}`,
             type: "message",
             role: "assistant",
@@ -1126,7 +1131,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
               // Store session for future resume
               if (currentSessionId) {
-                storeSession(opencodeSessionId, body.messages || [], currentSessionId)
+                storeSession(opencodeSessionId, body.messages || [], currentSessionId, systemContext)
               }
 
               if (!streamClosed) {
@@ -1368,7 +1373,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
   return { app, config: finalConfig }
 }
 
-export async function startProxyServer(config: Partial<ProxyConfig> = {}) {
+export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promise<ProxyInstance> {
   claudeExecutable = await resolveClaudeExecutableAsync()
   const { app, config: finalConfig } = createProxyServer(config)
 
@@ -1377,9 +1382,11 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}) {
     port: finalConfig.port,
     hostname: finalConfig.host,
   }, (info) => {
-    console.log(`Claude Max Proxy (Anthropic API) running at http://${finalConfig.host}:${info.port}`)
-    console.log(`\nTo use with OpenCode, run:`)
-    console.log(`  ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port} opencode`)
+    if (!finalConfig.silent) {
+      console.log(`Claude Max Proxy (Anthropic API) running at http://${finalConfig.host}:${info.port}`)
+      console.log(`\nTo use with OpenCode, run:`)
+      console.log(`  ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port} opencode`)
+    }
   }) as Server
 
   const idleMs = finalConfig.idleTimeoutSeconds * 1000
@@ -1387,17 +1394,23 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}) {
   server.headersTimeout = idleMs + 1000
 
   server.on("error", (error: NodeJS.ErrnoException) => {
-    if (error.code === "EADDRINUSE") {
+    if (error.code === "EADDRINUSE" && !finalConfig.silent) {
       console.error(`\nError: Port ${finalConfig.port} is already in use.`)
       console.error(`\nIs another instance of the proxy already running?`)
       console.error(`  Check with: lsof -i :${finalConfig.port}`)
       console.error(`  Kill it with: kill $(lsof -ti :${finalConfig.port})`)
       console.error(`\nOr use a different port:`)
       console.error(`  CLAUDE_PROXY_PORT=4567 claude-max-proxy`)
-      process.exit(1)
     }
-    throw error
   })
 
-  return server
+  return {
+    server,
+    config: finalConfig,
+    async close() {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()))
+      })
+    },
+  }
 }

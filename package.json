@@ -1,6 +1,6 @@
 {
   "name": "opencode-claude-max-proxy",
-  "version": "1.13.2",
+  "version": "1.13.6",
   "description": "Use your Claude Max subscription with OpenCode via proxy server",
   "type": "module",
   "main": "./dist/server.js",
@@ -9,10 +9,8 @@
     "claude-max-proxy": "./dist/cli.js"
   },
   "exports": {
-    ".": {
-      "types": "./dist/proxy/server.d.ts",
-      "default": "./dist/server.js"
-    }
+    ".": "./dist/server.js",
+    "./types": "./dist/types.js"
   },
   "engines": {
     "node": ">=22"
