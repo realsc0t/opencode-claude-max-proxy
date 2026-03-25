@@ -42,6 +42,8 @@ export interface QueryContext {
   adapter: AgentAdapter
   /** Callback to receive stderr lines from the Claude subprocess */
   onStderr?: (line: string) => void
+  /** Abort controller for cancellation/timeout */
+  abortController?: AbortController
 }
 
 /**
@@ -54,6 +56,7 @@ export function buildQueryOptions(ctx: QueryContext) {
     prompt, model, workingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv,
     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, onStderr,
+    abortController,
   } = ctx
 
   const blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
@@ -104,6 +107,7 @@ export function buildQueryOptions(ctx: QueryContext) {
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       ...(isUndo ? { forkSession: true, ...(undoRollbackUuid ? { resumeSessionAt: undoRollbackUuid } : {}) } : {}),
       ...(sdkHooks ? { hooks: sdkHooks } : {}),
+      ...(abortController ? { abortController } : {}),
     }
   }
 }

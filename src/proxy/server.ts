@@ -7,16 +7,24 @@ import type { Context } from "hono"
 import { DEFAULT_PROXY_CONFIG } from "./types"
 import type { ProxyConfig, ProxyInstance, ProxyServer } from "./types"
 export type { ProxyConfig, ProxyInstance, ProxyServer }
+import { env } from "../env"
 import { claudeLog } from "../logger"
 import { exec as execCallback } from "child_process"
+import { existsSync, mkdirSync, readdirSync, statSync, rmSync } from "fs"
 import { promisify } from "util"
 
-import { randomUUID } from "crypto"
+import { randomUUID, createHash } from "crypto"
+import { join } from "path"
+import { homedir } from "os"
 import { withClaudeLogContext } from "../logger"
 import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX } from "./passthroughTools"
 
-import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
+import { telemetryStore, diagnosticLog, createTelemetryRoutes } from "../telemetry"
+import { landingHtml } from "../telemetry/landing"
 import type { RequestMetric } from "../telemetry"
+import { keyStore, createAdminRoutes } from "../keys"
+import { getProxySettings } from "../keys/settings"
+import { initAdmin, isAdminConfigured, verifyJwt } from "../keys/auth"
 import { classifyError, isStaleSessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
 import { refreshOAuthToken } from "./tokenRefresh"
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext } from "./models"
@@ -24,6 +32,7 @@ import { getLastUserMessage } from "./messages"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
+import { createOpenAIRoutes } from "./openai"
 import {
   computeLineageHash,
   hashMessage,
@@ -37,16 +46,6 @@ import { lookupSession, storeSession, clearSessionCache, getMaxSessionsLimit, ev
 export { computeLineageHash, hashMessage, computeMessageHashes }
 export { clearSessionCache, getMaxSessionsLimit }
 export type { LineageResult }
-
-
-
-
-
-
-
-
-
-
 
 const exec = promisify(execCallback)
 
@@ -125,40 +124,142 @@ function buildFreshPrompt(
     .join("\n\n") || ""
 }
 
+type ProxyEnv = { Variables: { authKeyString?: string } }
+
+const WORKSPACE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+let lastPruneAt = 0
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000 // max once per hour
+
+function pruneStaleWorkspaces(dir: string): void {
+  // Throttle: only prune once per hour
+  if (Date.now() - lastPruneAt < PRUNE_INTERVAL_MS) return
+  lastPruneAt = Date.now()
+  try {
+    if (!existsSync(dir)) return
+    const entries = readdirSync(dir)
+    const now = Date.now()
+    for (const entry of entries) {
+      try {
+        const fullPath = join(dir, entry)
+        const stat = statSync(fullPath)
+        if (stat.isDirectory() && now - stat.mtimeMs > WORKSPACE_MAX_AGE_MS) {
+          rmSync(fullPath, { recursive: true, force: true })
+          claudeLog("workspace.pruned", { path: entry })
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
 export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServer {
   const finalConfig = { ...DEFAULT_PROXY_CONFIG, ...config }
-  const app = new Hono()
+  const app = new Hono<ProxyEnv>()
 
   app.use("*", cors())
 
-  app.get("/", (c) => {
-    // API clients get JSON, browsers get the landing page
-    const accept = c.req.header("accept") || ""
-    if (accept.includes("application/json") && !accept.includes("text/html")) {
-      return c.json({
-        status: "ok",
-        service: "meridian",
-        format: "anthropic",
-        endpoints: ["/v1/messages", "/messages", "/telemetry", "/health"]
-      })
+  // API key authentication middleware
+  // Auth is opt-in: only enforced when admin is configured (master key hash exists).
+  // Without it, the proxy works in open-access mode (backward compatible).
+  // When enabled:
+  //   Admin routes: JWT (own middleware)
+  //   Health: JWT
+  //   All other endpoints: managed API key or ANTHROPIC_API_KEY static key
+  app.use("*", async (c, next) => {
+    const path = new URL(c.req.url).pathname
+
+    // Public: root info only
+    if (path === "/") return next()
+
+    // Admin routes have their own JWT auth middleware
+    if (path.startsWith("/admin")) return next()
+
+    const staticKey = process.env.ANTHROPIC_API_KEY
+
+    // No admin configured — open access (backward compatible)
+    if (!isAdminConfigured()) return next()
+
+    // Health requires admin JWT
+    if (path === "/health") {
+      const bearer = c.req.header("authorization")?.replace(/^Bearer\s+/i, "")
+      if (!bearer || !verifyJwt(bearer)) {
+        return c.json({ error: { type: "authentication_error", message: "Admin authentication required." } }, 401)
+      }
+      return next()
     }
-    return c.html(landingHtml)
+
+    // All other endpoints: require auth
+    const bearer = c.req.header("authorization")
+    const xApiKey = c.req.header("x-api-key")
+    const providedKey = bearer?.startsWith("Bearer ")
+      ? bearer.slice(7)
+      : xApiKey
+
+    if (!providedKey) {
+      return c.json({
+        error: { type: "authentication_error", message: "API key required. Provide via Authorization: Bearer <key> or x-api-key header." }
+      }, 401)
+    }
+
+    // Check static env key (ANTHROPIC_API_KEY) for backward compat
+    if (staticKey && providedKey === staticKey) {
+      return next()
+    }
+
+    // Check managed key store
+    const managedKey = keyStore.validate(providedKey)
+    if (managedKey) {
+      // Check rate limits before allowing the request
+      const settings = getProxySettings()
+      const limitError = keyStore.checkLimits(providedKey, {
+        limit6h: settings.globalLimit6h,
+        limitWeekly: settings.globalLimitWeekly,
+      })
+      if (limitError) {
+        return c.json({
+          error: { type: "rate_limit_error", message: limitError }
+        }, 429)
+      }
+      c.set("authKeyString", providedKey)
+
+      return next()
+    }
+
+    return c.json({
+      error: { type: "authentication_error", message: "Invalid API key." }
+    }, 401)
+  })
+
+  app.get("/", (c) => {
+    return c.json({
+      status: "ok",
+      service: "meridian",
+      format: "anthropic",
+      endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/v1/models", "/admin"]
+    })
   })
 
   // --- Concurrency Control ---
   // Each request spawns an SDK subprocess (cli.js, ~11MB). Spawning multiple
   // simultaneously can crash the process. Serialize SDK queries with a queue.
-  const MAX_CONCURRENT_SESSIONS = parseInt((process.env.MERIDIAN_MAX_CONCURRENT ?? process.env.CLAUDE_PROXY_MAX_CONCURRENT) || "10", 10)
+
   let activeSessions = 0
   const sessionQueue: Array<{ resolve: () => void }> = []
 
   async function acquireSession(): Promise<void> {
-    if (activeSessions < MAX_CONCURRENT_SESSIONS) {
+    if (activeSessions < getProxySettings().maxConcurrent) {
       activeSessions++
       return
     }
-    return new Promise<void>((resolve) => {
-      sessionQueue.push({ resolve })
+    const QUEUE_TIMEOUT_MS = 120_000 // 2 minutes
+    return new Promise<void>((resolve, reject) => {
+      const entry = { resolve, reject: undefined as (() => void) | undefined }
+      const timer = setTimeout(() => {
+        const idx = sessionQueue.indexOf(entry as any)
+        if (idx !== -1) sessionQueue.splice(idx, 1)
+        reject(new Error(`Queue timeout: waited ${QUEUE_TIMEOUT_MS / 1000}s for a session slot (active=${activeSessions}/${getProxySettings().maxConcurrent}, queued=${sessionQueue.length})`))
+      }, QUEUE_TIMEOUT_MS)
+      ;(entry as any).resolve = () => { clearTimeout(timer); resolve() }
+      sessionQueue.push(entry as any)
     })
   }
 
@@ -172,7 +273,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   }
 
   const handleMessages = async (
-    c: Context,
+    c: Context<ProxyEnv>,
     requestMeta: { requestId: string; endpoint: string; queueEnteredAt: number; queueStartedAt: number }
   ) => {
     const requestStartAt = Date.now()
@@ -183,10 +284,36 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const authStatus = await getClaudeAuthStatusAsync()
         let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
         const adapter = detectAdapter(c)
-        // Allow adapter to override streaming preference (e.g. LiteLLM requires non-streaming)
-        const adapterStreamPref = adapter.prefersStreaming?.(body)
-        const stream = adapterStreamPref !== undefined ? adapterStreamPref : (body.stream ?? true)
-        const workingDirectory = (process.env.MERIDIAN_WORKDIR ?? process.env.CLAUDE_PROXY_WORKDIR) || adapter.extractWorkingDirectory(body) || process.cwd()
+        const stream = body.stream ?? true
+        const clientCwd = adapter.extractWorkingDirectory(body)
+        const agentSessionId = adapter.getSessionId(c)
+        const fallbackCwd = env('WORKDIR') || process.cwd()
+        // SDK spawn cwd must exist on this machine. Remote clients may send paths
+        // that don't exist here (e.g., Windows paths on a Linux proxy).
+        // When the client CWD doesn't exist locally, create a unique per-client
+        // workspace so each client gets isolated SDK memory/project files.
+        let workingDirectory: string
+        if (clientCwd && existsSync(clientCwd)) {
+          workingDirectory = clientCwd
+        } else if (clientCwd) {
+          // Remote client — create isolated workspace per client+project.
+          // Use session ID for isolation; fall back to client IP so anonymous
+          // clients from different machines still get separate workspaces.
+          // Use session ID for isolation; fall back to client IP so anonymous
+          // clients from different machines still get separate workspaces.
+          const clientId = agentSessionId || c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'anonymous'
+          const seed = `${clientCwd}:${clientId}`
+          const hash = createHash('sha256').update(seed).digest('hex').slice(0, 12)
+          const sanitized = clientCwd.replace(/[^a-zA-Z0-9_-]/g, '_').slice(-40)
+          workingDirectory = join(homedir(), '.meridian', 'workspaces', `${sanitized}-${hash}`)
+          if (!existsSync(workingDirectory)) {
+            mkdirSync(workingDirectory, { recursive: true })
+          }
+          // Prune stale workspaces (>7 days unused) on a best-effort basis
+          pruneStaleWorkspaces(join(homedir(), '.meridian', 'workspaces'))
+        } else {
+          workingDirectory = fallbackCwd
+        }
 
         // Strip env vars that would cause the SDK subprocess to loop back through
         // the proxy instead of using its native Claude Max auth. Also strip vars
@@ -212,7 +339,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         }
 
         // Session resume: look up cached Claude SDK session and classify mutation
-        const agentSessionId = adapter.getSessionId(c)
         const lineageResult = lookupSession(agentSessionId, body.messages || [], workingDirectory)
         const isResume = lineageResult.type === "continuation" || lineageResult.type === "compaction"
         const isUndo = lineageResult.type === "undo"
@@ -230,7 +356,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         }).join(" → ")
         const lineageType = lineageResult.type === "diverged" && !cachedSession ? "new" : lineageResult.type
         const msgCount = Array.isArray(body.messages) ? body.messages.length : 0
-        const requestLogLine = `${requestMeta.requestId} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
+        const requestLogLine = `${requestMeta.requestId} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""} active=${activeSessions}/${getProxySettings().maxConcurrent} msgCount=${msgCount}`
         console.error(`[PROXY] ${requestLogLine} msgs=${msgSummary}`)
         diagnosticLog.session(`${requestLogLine}`, requestMeta.requestId)
 
@@ -246,7 +372,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // OpenCode parses the Task tool description; other adapters return empty.
       const sdkAgents = adapter.buildSdkAgents?.(body, adapter.getAllowedMcpTools()) ?? {}
       const validAgentNames = Object.keys(sdkAgents)
-      if ((process.env.MERIDIAN_DEBUG ?? process.env.CLAUDE_PROXY_DEBUG) && validAgentNames.length > 0) {
+      if (env('DEBUG') && validAgentNames.length > 0) {
         claudeLog("debug.agents", { names: validAgentNames, count: validAgentNames.length })
       }
       systemContext += adapter.buildSystemContextAddendum?.(body, sdkAgents) ?? ""
@@ -398,7 +524,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       const adapterPassthrough = adapter.usesPassthrough?.()
       const passthrough = adapterPassthrough !== undefined
         ? adapterPassthrough
-        : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
+        : getProxySettings().passthrough
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
       const fileChanges: FileChange[] = []
 
@@ -449,9 +575,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           claudeLog("subprocess.stderr", { line: data.trimEnd() })
         }
 
+        // Lazy-resolve executable if not already set (e.g. when using createProxyServer directly)
+        if (!claudeExecutable) {
+          claudeExecutable = await resolveClaudeExecutableAsync()
+        }
+
         if (!stream) {
           const contentBlocks: Array<Record<string, unknown>> = []
           let assistantMessages = 0
+          let totalInputTokens = 0
+          let totalOutputTokens = 0
           const upstreamStartAt = Date.now()
           let firstChunkAt: number | undefined
           let currentSessionId: string | undefined
@@ -465,21 +598,26 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           // Pad to current message count (the last user message has no UUID yet)
           while (sdkUuidMap.length < allMessages.length) sdkUuidMap.push(null)
 
+          // AbortController for cancelling SDK subprocess on idle timeout
+          const requestAbort = new AbortController()
+          const idleMinutes = getProxySettings().idleTimeoutMinutes
+          const IDLE_TIMEOUT_MS = idleMinutes > 0 ? idleMinutes * 60 * 1000 : 0
+          let idleTimer: ReturnType<typeof setTimeout> | null = null
+          const resetIdleTimer = () => {
+            if (!IDLE_TIMEOUT_MS) return
+            if (idleTimer) clearTimeout(idleTimer)
+            idleTimer = setTimeout(() => {
+              console.error(`[PROXY] ${requestMeta.requestId} idle timeout (${idleMinutes}min no activity), aborting`)
+              requestAbort.abort()
+            }, IDLE_TIMEOUT_MS)
+          }
+          const clearIdleTimer = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null } }
+          resetIdleTimer()
+
           claudeLog("upstream.start", { mode: "non_stream", model })
 
           try {
-            // Lazy-resolve executable if not already set (e.g. when using createProxyServer directly)
-            if (!claudeExecutable) {
-              claudeExecutable = await resolveClaudeExecutableAsync()
-            }
-
             // Wrap SDK call with transparent retry for recoverable errors.
-            // Both stale-UUID and rate-limit retries happen inside the generator,
-            // so the message-processing loop doesn't need any retry logic.
-            //
-            // Rate-limit retry strategy:
-            //   1. Strip [1m] context (immediate, different model tier)
-            //   2. Backoff retries on base model (1s, 2s — exponential)
             const MAX_RATE_LIMIT_RETRIES = 2
             const RATE_LIMIT_BASE_DELAY_MS = 1000
 
@@ -497,7 +635,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, onStderr,
+                    abortController: requestAbort,
                   }))) {
+                    resetIdleTimer() // Activity detected
                     if ((event as any).type === "assistant") {
                       didYieldContent = true
                     }
@@ -526,6 +666,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, onStderr,
+                      abortController: requestAbort,
                     }))
                     return
                   }
@@ -602,6 +743,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 if ((message as any).uuid) {
                   sdkUuidMap.push((message as any).uuid)
                 }
+                // Capture token usage from SDK response
+                const msgUsage = (message as any).message?.usage
+                if (msgUsage) {
+                  totalInputTokens += msgUsage.input_tokens || 0
+                  totalOutputTokens += msgUsage.output_tokens || 0
+                }
                 if (!firstChunkAt) {
                   firstChunkAt = Date.now()
                   claudeLog("upstream.first_chunk", {
@@ -642,6 +789,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               ...(stderrOutput ? { stderr: stderrOutput } : {})
             })
             throw error
+          } finally {
+            clearIdleTimer()
           }
 
           // In passthrough mode, add captured tool_use blocks from the hook
@@ -708,25 +857,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
           const nonStreamQueueWaitMs = requestMeta.queueStartedAt - requestMeta.queueEnteredAt
           telemetryStore.record({
-            requestId: requestMeta.requestId,
-            timestamp: Date.now(),
-            model,
-            requestModel: body.model || undefined,
-            mode: "non-stream",
-            isResume,
-            isPassthrough: passthrough,
-            lineageType,
-            messageCount: allMessages.length,
-            sdkSessionId: currentSessionId || resumeSessionId,
-            status: 200,
-            queueWaitMs: nonStreamQueueWaitMs,
-            proxyOverheadMs: upstreamStartAt - requestStartAt - nonStreamQueueWaitMs,
+            requestId: requestMeta.requestId, timestamp: Date.now(), model,
+            requestModel: body.model || undefined, mode: "non-stream",
+            isResume, isPassthrough: passthrough, lineageType, messageCount: allMessages.length,
+            sdkSessionId: currentSessionId || resumeSessionId, status: 200,
+            queueWaitMs: nonStreamQueueWaitMs, proxyOverheadMs: upstreamStartAt - requestStartAt - nonStreamQueueWaitMs,
             ttfbMs: firstChunkAt ? firstChunkAt - upstreamStartAt : null,
-            upstreamDurationMs: Date.now() - upstreamStartAt,
-            totalDurationMs,
-            contentBlocks: contentBlocks.length,
-            textEvents: 0,
-            error: null,
+            upstreamDurationMs: Date.now() - upstreamStartAt, totalDurationMs,
+            contentBlocks: contentBlocks.length, textEvents: 0, error: null,
           })
 
           // Store session for future resume
@@ -736,6 +874,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
               const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`
 
+              // Record token usage for managed API keys
+              const authKeyString = c.get("authKeyString") as string | undefined
+              if (authKeyString) {
+                keyStore.recordUsage(authKeyString, totalInputTokens, totalOutputTokens, model)
+              }
+
               return new Response(JSON.stringify({
             id: `msg_${Date.now()}`,
             type: "message",
@@ -743,7 +887,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             content: contentBlocks,
             model: body.model,
             stop_reason: stopReason,
-            usage: { input_tokens: 0, output_tokens: 0 }
+            usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens }
           }), {
             headers: {
               "Content-Type": "application/json",
@@ -763,6 +907,25 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             let textEventsForwarded = 0
             let bytesSent = 0
             let streamClosed = false
+            let streamInputTokens = 0
+            let streamOutputTokens = 0
+
+            // AbortController for cancelling SDK subprocess on client disconnect or idle timeout.
+            // The timer resets on every SDK event — only fires if the subprocess goes silent.
+            const requestAbort = new AbortController()
+            const idleMinutes = getProxySettings().idleTimeoutMinutes
+            const IDLE_TIMEOUT_MS = idleMinutes > 0 ? idleMinutes * 60 * 1000 : 0
+            let idleTimer: ReturnType<typeof setTimeout> | null = null
+            const resetIdleTimer = () => {
+              if (!IDLE_TIMEOUT_MS) return
+              if (idleTimer) clearTimeout(idleTimer)
+              idleTimer = setTimeout(() => {
+                console.error(`[PROXY] ${requestMeta.requestId} idle timeout (${idleMinutes}min no activity), aborting SDK subprocess`)
+                requestAbort.abort()
+              }, IDLE_TIMEOUT_MS)
+            }
+            const clearIdleTimer = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null } }
+            resetIdleTimer() // Start the idle timer
 
             claudeLog("upstream.start", { mode: "stream", model })
 
@@ -775,6 +938,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               } catch (error) {
                 if (isClosedControllerError(error)) {
                   streamClosed = true
+                  requestAbort.abort() // Kill SDK subprocess on client disconnect
                   claudeLog("stream.client_closed", { source, streamEventsSeen, eventsForwarded })
                   return false
                 }
@@ -819,6 +983,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, onStderr,
+                      abortController: requestAbort,
                     }))) {
                       if ((event as any).type === "stream_event") {
                         didYieldClientEvent = true
@@ -848,6 +1013,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         model, workingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, onStderr,
+                        abortController: requestAbort,
                       }))
                       return
                     }
@@ -947,6 +1113,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   if (streamClosed) {
                     break
                   }
+                  resetIdleTimer() // Activity detected — reset idle timeout
 
                   // Capture session ID and assistant UUID from any SDK message
                   if ((message as any).session_id) {
@@ -976,6 +1143,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     if (eventType === "message_start") {
                       skipBlockIndices.clear()
                       sdkToClientIndex.clear()
+                      // Capture token usage from message_start
+                      const startUsage = (event as any).message?.usage
+                      if (startUsage) {
+                        streamInputTokens += startUsage.input_tokens || 0
+                        streamOutputTokens += startUsage.output_tokens || 0
+                      }
                       // Only emit the first message_start — subsequent ones are internal SDK turns
                       if (messageStartEmitted) {
                         continue
@@ -1024,6 +1197,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     // Skip intermediate message_delta with stop_reason: tool_use
                     // (SDK is about to execute MCP tools and continue)
                     if (eventType === "message_delta") {
+                      // Capture token usage from message_delta
+                      const deltaUsage = (event as any).usage
+                      if (deltaUsage) {
+                        streamOutputTokens += deltaUsage.output_tokens || 0
+                      }
                       const stopReason = (event as any).delta?.stop_reason
                       if (stopReason === "tool_use" && skipBlockIndices.size > 0) {
                         // All tool_use blocks in this turn were MCP — skip this delta
@@ -1068,6 +1246,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
               } finally {
                 clearInterval(heartbeat)
+                clearIdleTimer()
               }
 
               claudeLog("upstream.completed", {
@@ -1082,6 +1261,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // Store session for future resume
               if (currentSessionId) {
                 storeSession(agentSessionId, body.messages || [], currentSessionId, workingDirectory, sdkUuidMap)
+              }
+
+              // Record token usage for managed API keys
+              const streamAuthKeyString = c.get("authKeyString") as string | undefined
+              if (streamAuthKeyString) {
+                keyStore.recordUsage(streamAuthKeyString, streamInputTokens, streamOutputTokens, model)
               }
 
               if (!streamClosed) {
@@ -1198,25 +1383,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                 const streamQueueWaitMs = requestMeta.queueStartedAt - requestMeta.queueEnteredAt
                 telemetryStore.record({
-                  requestId: requestMeta.requestId,
-                  timestamp: Date.now(),
-                  model,
-                  requestModel: body.model || undefined,
-                  mode: "stream",
-                  isResume,
-                  isPassthrough: passthrough,
-                  lineageType,
-                  messageCount: allMessages.length,
-                  sdkSessionId: currentSessionId || resumeSessionId,
-                  status: 200,
-                  queueWaitMs: streamQueueWaitMs,
-                  proxyOverheadMs: upstreamStartAt - requestStartAt - streamQueueWaitMs,
+                  requestId: requestMeta.requestId, timestamp: Date.now(), model,
+                  requestModel: body.model || undefined, mode: "stream",
+                  isResume, isPassthrough: passthrough, lineageType, messageCount: allMessages.length,
+                  sdkSessionId: currentSessionId || resumeSessionId, status: 200,
+                  queueWaitMs: streamQueueWaitMs, proxyOverheadMs: upstreamStartAt - requestStartAt - streamQueueWaitMs,
                   ttfbMs: firstChunkAt ? firstChunkAt - upstreamStartAt : null,
-                  upstreamDurationMs: Date.now() - upstreamStartAt,
-                  totalDurationMs: streamTotalDurationMs,
-                  contentBlocks: eventsForwarded,
-                  textEvents: textEventsForwarded,
-                  error: null,
+                  upstreamDurationMs: Date.now() - upstreamStartAt, totalDurationMs: streamTotalDurationMs,
+                  contentBlocks: eventsForwarded, textEvents: textEventsForwarded, error: null,
                 })
 
                 if (textEventsForwarded === 0) {
@@ -1229,6 +1403,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
               }
             } catch (error) {
+              clearIdleTimer()
+              requestAbort.abort() // Ensure subprocess is cleaned up on any error
               if (isClosedControllerError(error)) {
                 streamClosed = true
                 claudeLog("stream.client_closed", {
@@ -1308,25 +1484,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
         const errorQueueWaitMs = requestMeta.queueStartedAt - requestMeta.queueEnteredAt
         telemetryStore.record({
-          requestId: requestMeta.requestId,
-          timestamp: Date.now(),
-          model: "unknown",
-          requestModel: undefined,
-          mode: "non-stream",
-          isResume: false,
-          isPassthrough: Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH)),
-          lineageType: undefined,
-          messageCount: undefined,
-          sdkSessionId: undefined,
-          status: classified.status,
-          queueWaitMs: errorQueueWaitMs,
-          proxyOverheadMs: Date.now() - requestStartAt - errorQueueWaitMs,
-          ttfbMs: null,
-          upstreamDurationMs: Date.now() - requestStartAt,
-          totalDurationMs: Date.now() - requestStartAt,
-          contentBlocks: 0,
-          textEvents: 0,
-          error: classified.type,
+          requestId: requestMeta.requestId, timestamp: Date.now(), model: "unknown",
+          requestModel: undefined, mode: "non-stream",
+          isResume: false, isPassthrough: getProxySettings().passthrough, lineageType: undefined,
+          messageCount: undefined, sdkSessionId: undefined, status: classified.status,
+          queueWaitMs: errorQueueWaitMs, proxyOverheadMs: Date.now() - requestStartAt - errorQueueWaitMs,
+          ttfbMs: null, upstreamDurationMs: Date.now() - requestStartAt,
+          totalDurationMs: Date.now() - requestStartAt, contentBlocks: 0, textEvents: 0, error: classified.type,
         })
 
         return new Response(
@@ -1341,6 +1505,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     const requestId = c.req.header("x-request-id") || randomUUID()
     const queueEnteredAt = Date.now()
     claudeLog("request.enter", { requestId, endpoint })
+
     await acquireSession()
     const queueStartedAt = Date.now()
     try {
@@ -1353,8 +1518,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   app.post("/v1/messages", (c) => handleWithQueue(c, "/v1/messages"))
   app.post("/messages", (c) => handleWithQueue(c, "/messages"))
 
-  // Telemetry dashboard and API
-  app.route("/telemetry", createTelemetryRoutes())
+  // Admin dashboard, key management, and telemetry
+  app.route("/admin", createAdminRoutes())
+
+  // OpenAI-compatible API (transcodes to Anthropic /v1/messages internally)
+  app.route("/v1", createOpenAIRoutes(app.fetch.bind(app)))
 
   // Health check endpoint — verifies auth status
   app.get("/health", async (c) => {
@@ -1364,7 +1532,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         return c.json({
           status: "degraded",
           error: "Could not verify auth status",
-          mode: (process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH) ? "passthrough" : "internal",
+          mode: getProxySettings().passthrough ? "passthrough" : "internal",
         })
       }
       if (!auth.loggedIn) {
@@ -1381,13 +1549,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           email: auth.email,
           subscriptionType: auth.subscriptionType,
         },
-        mode: (process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH) ? "passthrough" : "internal",
+        mode: getProxySettings().passthrough ? "passthrough" : "internal",
       })
     } catch {
       return c.json({
         status: "degraded",
         error: "Could not verify auth status",
-        mode: (process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH) ? "passthrough" : "internal",
+        mode: getProxySettings().passthrough ? "passthrough" : "internal",
       })
     }
   })
@@ -1413,6 +1581,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 }
 
 export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promise<ProxyInstance> {
+  initAdmin()
   claudeExecutable = await resolveClaudeExecutableAsync()
   const { app, config: finalConfig } = createProxyServer(config)
 
@@ -1423,10 +1592,14 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
     overrideGlobalObjects: false,
   }, (info) => {
     if (!finalConfig.silent) {
-      console.log(`Meridian running at http://${finalConfig.host}:${info.port}`)
-      console.log(`Telemetry dashboard: http://${finalConfig.host}:${info.port}/telemetry`)
-      console.log(`\nPoint any Anthropic-compatible tool at this endpoint:`)
-      console.log(`  ANTHROPIC_API_KEY=x ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port}`)
+      const url = `http://${finalConfig.host}:${info.port}`
+      console.log(`Meridian running at ${url}`)
+      console.log(`  ANTHROPIC_BASE_URL=${url}`)
+      if (isAdminConfigured()) {
+        console.log(`  Admin: configured`)
+      }
+      console.log(`  Admin dashboard: ${url}/admin`)
+      console.log(`  Managed keys: ${keyStore.size}`)
     }
   }) as Server
 

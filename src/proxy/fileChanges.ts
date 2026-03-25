@@ -16,6 +16,21 @@ export interface FileChange {
 }
 
 /**
+ * Validate that a string looks like a plausible file path.
+ * Filters out false positives from merge conflict markers, code fragments, etc.
+ */
+function isPlausiblePath(p: string): boolean {
+  if (!p || p.length < 2 || p.length > 500) return false
+  // Reject merge conflict markers
+  if (/^>{2,}|^<{2,}|^={3,}/.test(p)) return false
+  // Reject strings with characters that don't belong in file paths
+  if (/[{}()=;`$]/.test(p)) return false
+  // Reject common code keywords that aren't paths
+  if (/^(void|null|undefined|true|false|return|const|let|var|function|class|import|export)$/i.test(p)) return false
+  return true
+}
+
+/**
  * Extract a FileChange from a PostToolUse hook input, if applicable.
  *
  * Only tracks write and edit operations — read/glob/grep are read-only.
@@ -35,11 +50,11 @@ export function extractFileChange(
   const shortName = toolName.slice(mcpPrefix.length)
   const input = toolInput as Record<string, unknown> | null | undefined
 
-  if (shortName === "write" && input?.path) {
+  if (shortName === "write" && input?.path && isPlausiblePath(String(input.path))) {
     return { operation: "wrote", path: String(input.path) }
   }
 
-  if (shortName === "edit" && input?.path) {
+  if (shortName === "edit" && input?.path && isPlausiblePath(String(input.path))) {
     return { operation: "edited", path: String(input.path) }
   }
 
@@ -103,8 +118,8 @@ export function extractFileChangesFromBash(command: string): FileChange[] {
   const addChange = (operation: FileChange["operation"], path: string) => {
     // Filter out /dev/null and common non-file targets
     if (path === "/dev/null" || path === "/dev/stderr" || path === "/dev/stdout") return
-    // Filter empty or whitespace-only paths
-    if (!path.trim()) return
+    // Filter empty or whitespace-only paths, and non-path strings
+    if (!path.trim() || !isPlausiblePath(path)) return
     const key = `${operation}:${path}`
     if (!seen.has(key)) {
       seen.add(key)

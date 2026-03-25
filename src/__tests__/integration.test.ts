@@ -8,6 +8,9 @@
  * But they test the full Hono HTTP stack, SSE parsing, etc.
  */
 
+// Set static API key so auth middleware passes even when admin is configured by parallel tests
+process.env.ANTHROPIC_API_KEY = "dummy"
+
 import { describe, it, expect, mock, beforeAll, afterAll, beforeEach } from "bun:test"
 import {
   messageStart,
@@ -52,6 +55,7 @@ mock.module("../mcpTools", () => ({
 }))
 
 const { createProxyServer } = await import("../proxy/server")
+
 
 // Use Hono's built-in test client
 function createTestApp() {

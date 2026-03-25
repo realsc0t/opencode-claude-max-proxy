@@ -147,6 +147,7 @@ export function isExpiredTokenError(errMsg: string): boolean {
 export function isStaleSessionError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   return error.message.includes("No message found with message.uuid")
+    || error.message.includes("No conversation found with session ID")
 }
 
 /**
