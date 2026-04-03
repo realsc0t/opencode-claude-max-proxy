@@ -1274,7 +1274,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 // In passthrough mode, emit captured tool_use blocks as stream events
                 // Skip any that were already forwarded during the stream (dedup by ID)
                 const unseenToolUses = capturedToolUses.filter(tu => !streamedToolUseIds.has(tu.id))
-                if (passthrough && capturedToolUses.length > 0 && messageStartEmitted) {
+                if (passthrough && unseenToolUses.length > 0 && messageStartEmitted) {
                   for (let i = 0; i < unseenToolUses.length; i++) {
                     const tu = unseenToolUses[i]!
                     const blockIndex = eventsForwarded + i
