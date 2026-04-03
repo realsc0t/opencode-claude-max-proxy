@@ -23,10 +23,14 @@ function isPlausiblePath(p: string): boolean {
   if (!p || p.length < 2 || p.length > 500) return false
   // Reject merge conflict markers
   if (/^>{2,}|^<{2,}|^={3,}/.test(p)) return false
+  // Reject HTML tags and fragments
+  if (/^<|>/.test(p)) return false
   // Reject strings with characters that don't belong in file paths
   if (/[{}()=;`$]/.test(p)) return false
   // Reject common code keywords that aren't paths
   if (/^(void|null|undefined|true|false|return|const|let|var|function|class|import|export)$/i.test(p)) return false
+  // Must contain a path separator or file extension to be a real path
+  if (!/[/\\.]/.test(p)) return false
   return true
 }
 

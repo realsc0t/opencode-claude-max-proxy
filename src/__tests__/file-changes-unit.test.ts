@@ -69,8 +69,14 @@ describe("extractFileChange", () => {
   })
 
   it("should coerce non-string path to string", () => {
-    const result = extractFileChange("mcp__opencode__write", { path: 42, content: "x" }, PREFIX)
-    expect(result).toEqual({ operation: "wrote", path: "42" })
+    const result = extractFileChange("mcp__opencode__write", { path: "/tmp/42.txt", content: "x" }, PREFIX)
+    expect(result).toEqual({ operation: "wrote", path: "/tmp/42.txt" })
+  })
+
+  it("should reject non-path values", () => {
+    expect(extractFileChange("mcp__opencode__write", { path: 42, content: "x" }, PREFIX)).toBeUndefined()
+    expect(extractFileChange("mcp__opencode__write", { path: "<div", content: "x" }, PREFIX)).toBeUndefined()
+    expect(extractFileChange("mcp__opencode__write", { path: "void", content: "x" }, PREFIX)).toBeUndefined()
   })
 })
 
