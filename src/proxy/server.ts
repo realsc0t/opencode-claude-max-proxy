@@ -1207,13 +1207,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         // All tool_use blocks in this turn were MCP — skip this delta
                         continue
                       }
-                      // In passthrough mode with captured tools, skip ALL SDK stop_reasons.
-                      // The SDK emits "end_turn" from turn 2 after blocking tools in turn 1,
-                      // which makes clients think no tool execution is needed.
-                      // We emit the correct stop_reason after the stream ends.
-                      if (passthrough && capturedToolUses.length > 0 && stopReason) {
-                        continue
-                      }
+
                     }
 
                     // Forward all other events (text, non-MCP tool_use like Task, message events)
