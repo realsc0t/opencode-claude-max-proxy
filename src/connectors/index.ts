@@ -1,4 +1,6 @@
 export { createConnectorRoutes } from "./routes"
 export { getAllConnectors, getConnector, getConnectorInternal, findConnectorForModel, getAllEnabledModels, toggleModel } from "./store"
 export { fetchModelsForConnector } from "./fetcher"
+export { routeRequest, type RouteResult } from "./router"
+export { forwardToOpenAI, forwardToAnthropic, detectFormat } from "./forward"
 export type { ConnectorConfig, ConnectorType, ModelEntry } from "./types"

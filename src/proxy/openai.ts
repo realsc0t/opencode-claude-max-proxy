@@ -17,6 +17,7 @@
 
 import { Hono } from "hono"
 import type { Context } from "hono"
+import { getAllEnabledModels } from "../connectors"
 
 // ---------------------------------------------------------------------------
 // Model catalog
@@ -373,9 +374,18 @@ function transcodeStreamChunk(eventType: string, data: any, requestModel: string
 export function createOpenAIRoutes(internalFetch: (request: Request) => Response | Promise<Response>) {
   const routes = new Hono()
 
-  // GET /models
+  // GET /models — includes both Claude SDK models and API connector models
   routes.get("/models", (c) => {
-    return c.json({ object: "list", data: MODEL_CATALOG.map(toOpenAIModel) })
+    const sdkModels = MODEL_CATALOG.map(toOpenAIModel)
+    const connectorModels = getAllEnabledModels()
+      .filter(m => m.connectorType !== "claude-sdk")
+      .map(m => ({
+        id: m.id,
+        object: "model" as const,
+        created: 0,
+        owned_by: m.connectorType,
+      }))
+    return c.json({ object: "list", data: [...sdkModels, ...connectorModels] })
   })
 
   // GET /models/:id

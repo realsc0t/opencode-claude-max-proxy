@@ -32,6 +32,7 @@ import { getLastUserMessage } from "./messages"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
+import { routeRequest, forwardToOpenAI, forwardToAnthropic, detectFormat } from "../connectors"
 import { createOpenAIRoutes } from "./openai"
 import {
   computeLineageHash,
@@ -280,7 +281,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
     return withClaudeLogContext({ requestId: requestMeta.requestId, endpoint: requestMeta.endpoint }, async () => {
       try {
-        const body = await c.req.json()
+        const body = (c as any)._parsedBody || await c.req.json()
         const authStatus = await getClaudeAuthStatusAsync()
         let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
         const adapter = detectAdapter(c)
@@ -1506,6 +1507,62 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     const requestId = c.req.header("x-request-id") || randomUUID()
     const queueEnteredAt = Date.now()
     claudeLog("request.enter", { requestId, endpoint })
+
+    // Connector routing: check if the model should be forwarded to an API connector
+    // instead of the Claude SDK. This runs BEFORE acquiring a session slot since
+    // API forwarding doesn't use the SDK subprocess.
+    try {
+      const body = await c.req.json()
+      const model = body.model || ""
+      const route = routeRequest(model)
+
+      if (route.action === "reject") {
+        return c.json({ error: { type: "invalid_request_error", message: route.error } }, 400)
+      }
+
+      if (route.action === "forward-openai" && route.connector) {
+        const inputFormat = endpoint.includes("chat/completions") ? "openai" as const : "anthropic" as const
+        claudeLog("connector.forward", { requestId, model, connector: route.connector.name, type: "openai", inputFormat })
+        const response = await forwardToOpenAI(route.connector, body, inputFormat)
+        // Record token usage for managed API keys
+        const authKey = c.get("authKeyString") as string | undefined
+        if (authKey && !body.stream) {
+          try {
+            const cloned = response.clone()
+            const data = await cloned.json() as any
+            const input = data.usage?.prompt_tokens || data.usage?.input_tokens || 0
+            const output = data.usage?.completion_tokens || data.usage?.output_tokens || 0
+            keyStore.recordUsage(authKey, input, output, model)
+          } catch {}
+        }
+        return response
+      }
+
+      if (route.action === "forward-anthropic" && route.connector) {
+        const inputFormat = endpoint.includes("chat/completions") ? "openai" as const : "anthropic" as const
+        claudeLog("connector.forward", { requestId, model, connector: route.connector.name, type: "anthropic", inputFormat })
+        const response = await forwardToAnthropic(route.connector, body, inputFormat)
+        const authKey = c.get("authKeyString") as string | undefined
+        if (authKey && !body.stream) {
+          try {
+            const cloned = response.clone()
+            const data = await cloned.json() as any
+            const input = data.usage?.input_tokens || data.usage?.prompt_tokens || 0
+            const output = data.usage?.output_tokens || data.usage?.completion_tokens || 0
+            keyStore.recordUsage(authKey, input, output, model)
+          } catch {}
+        }
+        return response
+      }
+
+      // Claude SDK path — needs a session slot
+      // Re-attach the parsed body so handleMessages can read it
+      // (c.req.json() can only be called once, so we cache it)
+      ;(c as any)._parsedBody = body
+    } catch (e) {
+      // If body parsing fails, fall through to handleMessages which will also fail
+      // with a proper error message
+    }
 
     await acquireSession()
     const queueStartedAt = Date.now()
