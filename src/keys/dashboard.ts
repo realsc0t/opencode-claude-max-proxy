@@ -129,6 +129,25 @@ export const adminDashboardHtml = `<!DOCTYPE html>
       <input type="number" id="idle-timeout" min="0" max="60" disabled style="width:50px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px" placeholder="10" title="Kill request if no response activity for this many minutes (0 = disabled)">
       <span style="font-size:10px;color:var(--muted)">min</span>
     </div>
+    <div style="border-left:1px solid var(--border);height:20px"></div>
+    <div style="display:flex;gap:4px;align-items:center">
+      <label style="font-size:11px;color:var(--muted)">Sonnet:</label>
+      <select id="sonnet-model" disabled style="padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px">
+        <option value="">auto</option>
+        <option value="sonnet">sonnet (200k)</option>
+        <option value="sonnet[1m]">sonnet[1m] (1M)</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:4px;align-items:center">
+      <label style="font-size:11px;color:var(--muted)">Files:</label>
+      <input type="checkbox" id="track-files-toggle" disabled style="width:13px;height:13px;cursor:pointer">
+      <span id="track-files-label" style="font-size:10px">on</span>
+    </div>
+    <div style="display:flex;gap:4px;align-items:center">
+      <label style="font-size:11px;color:var(--muted)">Debug:</label>
+      <input type="checkbox" id="debug-toggle" disabled style="width:13px;height:13px;cursor:pointer">
+      <span id="debug-label" style="font-size:10px">off</span>
+    </div>
     <button class="btn-ghost btn-sm" id="settings-edit-btn" onclick="editSettings()" style="padding:2px 8px;font-size:11px">Edit</button>
     <button class="btn-primary btn-sm" id="settings-save-btn" onclick="saveSettings()" style="display:none;padding:2px 8px;font-size:11px">Save</button>
     <button class="btn-ghost btn-sm" id="settings-cancel-btn" onclick="cancelSettings()" style="display:none;padding:2px 8px;font-size:11px">Cancel</button>
@@ -268,6 +287,13 @@ function applySettings(s) {
   $('#global-limit-6h').value = s.globalLimit6h || '';
   $('#global-limit-weekly').value = s.globalLimitWeekly || '';
   $('#idle-timeout').value = s.idleTimeoutMinutes ?? 10;
+  $('#sonnet-model').value = s.sonnetModel || '';
+  $('#track-files-toggle').checked = s.trackFileChanges !== false;
+  $('#track-files-label').textContent = s.trackFileChanges !== false ? 'on' : 'off';
+  $('#track-files-label').style.color = s.trackFileChanges !== false ? 'var(--green)' : 'var(--muted)';
+  $('#debug-toggle').checked = !!s.debug;
+  $('#debug-label').textContent = s.debug ? 'on' : 'off';
+  $('#debug-label').style.color = s.debug ? 'var(--yellow)' : 'var(--muted)';
 }
 
 function setSettingsEditable(editable) {
@@ -280,6 +306,10 @@ function setSettingsEditable(editable) {
     const el = $('#' + id);
     if (el) el.style.background = editable ? 'var(--surface)' : 'var(--bg)';
   });
+  $('#sonnet-model').disabled = !editable;
+  $('#sonnet-model').style.background = editable ? 'var(--surface)' : 'var(--bg)';
+  $('#track-files-toggle').disabled = !editable;
+  $('#debug-toggle').disabled = !editable;
   $('#settings-edit-btn').style.display = editable ? 'none' : '';
   $('#settings-save-btn').style.display = editable ? '' : 'none';
   $('#settings-cancel-btn').style.display = editable ? '' : 'none';
@@ -310,6 +340,16 @@ $('#passthrough-toggle')?.addEventListener('change', function() {
   $('#passthrough-label').style.color = this.checked ? 'var(--green)' : 'var(--muted)';
 });
 
+$('#track-files-toggle')?.addEventListener('change', function() {
+  $('#track-files-label').textContent = this.checked ? 'on' : 'off';
+  $('#track-files-label').style.color = this.checked ? 'var(--green)' : 'var(--muted)';
+});
+
+$('#debug-toggle')?.addEventListener('change', function() {
+  $('#debug-label').textContent = this.checked ? 'on' : 'off';
+  $('#debug-label').style.color = this.checked ? 'var(--yellow)' : 'var(--muted)';
+});
+
 async function saveSettings() {
   const val = parseInt($('#max-concurrent').value, 10);
   if (!val || val < 1) { toast('Invalid value', true); return; }
@@ -320,6 +360,9 @@ async function saveSettings() {
       globalLimit6h: parseInt($('#global-limit-6h').value, 10) || 0,
       globalLimitWeekly: parseInt($('#global-limit-weekly').value, 10) || 0,
       idleTimeoutMinutes: parseInt($('#idle-timeout').value, 10) || 0,
+      sonnetModel: $('#sonnet-model').value,
+      trackFileChanges: $('#track-files-toggle').checked,
+      debug: $('#debug-toggle').checked,
     });
     savedSettings = s;
     applySettings(s);

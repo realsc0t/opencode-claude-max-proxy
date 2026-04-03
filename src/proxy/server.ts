@@ -372,7 +372,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // OpenCode parses the Task tool description; other adapters return empty.
       const sdkAgents = adapter.buildSdkAgents?.(body, adapter.getAllowedMcpTools()) ?? {}
       const validAgentNames = Object.keys(sdkAgents)
-      if (env('DEBUG') && validAgentNames.length > 0) {
+      if (getProxySettings().debug && validAgentNames.length > 0) {
         claudeLog("debug.agents", { names: validAgentNames, count: validAgentNames.length })
       }
       systemContext += adapter.buildSystemContextAddendum?.(body, sdkAgents) ?? ""
@@ -542,7 +542,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // PostToolUse hook tracks file changes from MCP tools (internal mode only).
       // Catches write, edit, AND bash redirects (>, >>, tee, sed -i).
       const mcpPrefix = `mcp__${adapter.getMcpServerName()}__`
-      const trackFileChanges = !(process.env.MERIDIAN_NO_FILE_CHANGES ?? process.env.CLAUDE_PROXY_NO_FILE_CHANGES)
+      const trackFileChanges = getProxySettings().trackFileChanges
       const fileChangeHook = trackFileChanges ? createFileChangeHook(fileChanges, mcpPrefix) : undefined
 
       const sdkHooks = passthrough

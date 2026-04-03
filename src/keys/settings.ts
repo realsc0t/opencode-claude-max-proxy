@@ -16,6 +16,12 @@ export interface ProxySettings {
   globalLimitWeekly: number
   /** Idle timeout in minutes — abort SDK subprocess if no events for this long (0 = disabled) */
   idleTimeoutMinutes: number
+  /** Override sonnet model variant: "sonnet" (200k) or "sonnet[1m]" (1M context). Empty = auto-detect from subscription. */
+  sonnetModel: string
+  /** Track file changes in responses (write/edit operations) */
+  trackFileChanges: boolean
+  /** Enable debug logging */
+  debug: boolean
 }
 
 const DEFAULTS: ProxySettings = {
@@ -24,6 +30,9 @@ const DEFAULTS: ProxySettings = {
   globalLimit6h: 0,
   globalLimitWeekly: 0,
   idleTimeoutMinutes: 10,
+  sonnetModel: env("SONNET_MODEL") || "",
+  trackFileChanges: env("NO_FILE_CHANGES") !== "1",
+  debug: env("DEBUG") === "1",
 }
 
 function defaultSettingsPath(): string {
@@ -69,6 +78,16 @@ export function updateProxySettings(updates: Partial<ProxySettings>): ProxySetti
   }
   if (updates.idleTimeoutMinutes != null) {
     settings.idleTimeoutMinutes = Math.max(0, Math.min(60, Math.floor(updates.idleTimeoutMinutes)))
+  }
+  if (updates.sonnetModel != null) {
+    const allowed = ["", "sonnet", "sonnet[1m]"]
+    settings.sonnetModel = allowed.includes(updates.sonnetModel) ? updates.sonnetModel : ""
+  }
+  if (updates.trackFileChanges != null) {
+    settings.trackFileChanges = Boolean(updates.trackFileChanges)
+  }
+  if (updates.debug != null) {
+    settings.debug = Boolean(updates.debug)
   }
   flush()
   return { ...settings }

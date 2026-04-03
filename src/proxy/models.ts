@@ -3,6 +3,7 @@
  */
 
 import { exec as execCallback } from "child_process"
+import { getProxySettings } from "../keys/settings"
 import { existsSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
@@ -48,7 +49,8 @@ export function mapModelToClaudeModel(model: string, subscriptionType?: string |
 
   if (model.includes("opus")) return use1m ? "opus[1m]" : "opus"
 
-  const sonnetOverride = (process.env.MERIDIAN_SONNET_MODEL ?? process.env.CLAUDE_PROXY_SONNET_MODEL) as ClaudeModel | undefined
+  const settingsOverride = getProxySettings().sonnetModel
+  const sonnetOverride = (settingsOverride || undefined) as ClaudeModel | undefined
   if (sonnetOverride === "sonnet" || sonnetOverride === "sonnet[1m]") return sonnetOverride
 
   if (!use1m) return "sonnet"

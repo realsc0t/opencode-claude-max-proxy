@@ -50,11 +50,15 @@ describe("mapModelToClaudeModel", () => {
   })
 
   it("respects explicit sonnet model override", () => {
-    process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet[1m]"
+    const { updateProxySettings } = require("../keys/settings")
+    updateProxySettings({ sonnetModel: "sonnet[1m]" })
     expect(mapModelToClaudeModel("sonnet", "team")).toBe("sonnet[1m]")
 
-    process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet"
+    updateProxySettings({ sonnetModel: "sonnet" })
     expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet")
+
+    // Reset to auto
+    updateProxySettings({ sonnetModel: "" })
   })
 })
 
