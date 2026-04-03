@@ -27,17 +27,9 @@ export function routeRequest(model: string): RouteResult {
   const connector = findConnectorForModel(model)
 
   if (!connector) {
-    // No connector has this model enabled — check if it's a Claude SDK
-    // shorthand (sonnet, opus, haiku) that maps to the built-in connector
-    const claudeShorthands = ["sonnet", "opus", "haiku"]
-    const isClaudeModel = claudeShorthands.some(s => model.toLowerCase().includes(s))
-    if (isClaudeModel) {
-      // Fall through to Claude SDK handler (backward compatible)
-      return { action: "claude-sdk" }
-    }
     return {
       action: "reject",
-      error: `Model "${model}" is not available. Check connector configuration.`,
+      error: `Model "${model}" is not available. Enable it in the Configuration tab.`,
     }
   }
 
