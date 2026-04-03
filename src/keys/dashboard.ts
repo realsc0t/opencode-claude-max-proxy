@@ -538,7 +538,7 @@ async function loadKeys() {
       const bar6h = lim6h > 0 ? usageBar(used6h, lim6h) : '<span style="font-size:11px">' + fmtNum(used6h) + ' <span style="color:var(--muted)">(no limit)</span></span>';
       const barW = limW > 0 ? usageBar(usedW, limW) : '<span style="font-size:11px">' + fmtNum(usedW) + ' <span style="color:var(--muted)">(no limit)</span></span>';
 
-      html += '<tr style="cursor:pointer" onclick="toggleUsage(\\'' + k.id + '\\')">'
+      html += '<tr style="cursor:pointer" onclick="toggleUsage(&apos;' + k.id + '&apos;)">'
         + '<td><strong>' + esc(k.name) + '</strong></td>'
         + '<td class="mono">' + esc(k.key) + '</td>'
         + '<td>' + badge + '</td>'
@@ -546,11 +546,11 @@ async function loadKeys() {
         + '<td style="min-width:180px"><div style="font-size:11px;margin-bottom:2px">6h: ' + bar6h + '</div><div style="font-size:11px">Week: ' + barW + '</div></td>'
         + '<td class="mono" style="color:var(--muted)">' + ago(k.lastUsedAt) + '</td>'
         + '<td style="white-space:nowrap" onclick="event.stopPropagation()">'
-        + '<button class="btn-sm btn-ghost" onclick="copyExistingKey(\\'' + k.id + '\\')">Copy</button> '
-        + '<button class="btn-sm btn-ghost" onclick="toggleLimits(\\'' + k.id + '\\')">Limits</button> '
-        + '<button class="btn-sm btn-ghost" onclick="toggleKey(\\'' + k.id + '\\',' + !k.enabled + ')">'
+        + '<button class="btn-sm btn-ghost" onclick="copyExistingKey(&apos;' + k.id + '&apos;)">Copy</button> '
+        + '<button class="btn-sm btn-ghost" onclick="toggleLimits(&apos;' + k.id + '&apos;)">Limits</button> '
+        + '<button class="btn-sm btn-ghost" onclick="toggleKey(&apos;' + k.id + '&apos;,' + !k.enabled + ')">'
         + (k.enabled ? 'Disable' : 'Enable') + '</button> '
-        + '<button class="btn-sm btn-danger" onclick="deleteKey(\\'' + k.id + '\\',\\'' + esc(k.name) + '\\')">Delete</button>'
+        + '<button class="btn-sm btn-danger" onclick="deleteKey(&apos;' + k.id + '&apos;,&apos;' + esc(k.name) + '&apos;)">Delete</button>'
         + '</td></tr>';
 
       // Per-model usage row (expandable by clicking the row)
@@ -577,7 +577,7 @@ async function loadKeys() {
         + '<input type="number" id="lim6h-' + k.id + '" value="' + lim6h + '" min="0" style="width:130px;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px" step="10000" placeholder="0 = none"></div>'
         + '<div style="display:flex;gap:6px;align-items:center"><label style="font-size:12px;color:var(--muted)">Limit /week:</label>'
         + '<input type="number" id="limW-' + k.id + '" value="' + limW + '" min="0" style="width:130px;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px" step="10000" placeholder="0 = none"></div>'
-        + '<button class="btn-primary btn-sm" onclick="saveLimits(\\'' + k.id + '\\')">Apply</button>'
+        + '<button class="btn-primary btn-sm" onclick="saveLimits(&apos;' + k.id + '&apos;)">Apply</button>'
         + '</div></td></tr>';
     }
     html += '</tbody></table>';
@@ -814,9 +814,9 @@ async function loadConnectors() {
       html += '</div>';
       html += '<div style="display:flex;gap:6px">';
       if (c.type !== 'claude-sdk') {
-        html += '<button class="btn-ghost btn-sm" onclick="fetchModels(\'' + c.id + '\')">Fetch Models</button>';
-        html += '<button class="btn-ghost btn-sm" onclick="toggleConnector(\'' + c.id + '\',' + !c.enabled + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>';
-        html += '<button class="btn-danger btn-sm" onclick="deleteConnector(\'' + c.id + '\',\'' + esc(c.name) + '\')">Delete</button>';
+        html += '<button class="btn-ghost btn-sm" onclick="fetchModels(&apos;' + c.id + '&apos;)">Fetch Models</button>';
+        html += '<button class="btn-ghost btn-sm" onclick="toggleConnector(&apos;' + c.id + '&apos;,' + !c.enabled + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>';
+        html += '<button class="btn-danger btn-sm" onclick="deleteConnector(&apos;' + c.id + '&apos;,&apos;' + esc(c.name) + '&apos;)">Delete</button>';
       }
       html += '</div></div>';
 
@@ -828,7 +828,7 @@ async function loadConnectors() {
           const mBg = m.enabled ? 'rgba(63,185,80,0.1)' : 'var(--bg)';
           const ctx = m.contextWindow ? (m.contextWindow >= 1000000 ? (m.contextWindow/1000000) + 'M' : (m.contextWindow/1000) + 'K') : '';
           html += '<label style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:' + mBg + ';border:1px solid ' + (m.enabled ? 'var(--green)' : 'var(--border)') + ';border-radius:4px;cursor:pointer;font-size:12px;color:' + mColor + '">';
-          html += '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleConnModel(\'' + c.id + '\',\'' + esc(m.id) + '\',this.checked)" style="width:12px;height:12px">';
+          html += '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleConnModel(&apos;' + c.id + '&apos;,&apos;' + esc(m.id) + '&apos;,this.checked)" style="width:12px;height:12px">';
           html += esc(m.name || m.id);
           if (ctx) html += ' <span style="color:var(--muted);font-size:10px">(' + ctx + ')</span>';
           html += '</label>';
