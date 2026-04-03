@@ -31,6 +31,8 @@ function isPlausiblePath(p: string): boolean {
   if (/^(void|null|undefined|true|false|return|const|let|var|function|class|import|export)$/i.test(p)) return false
   // Must contain a path separator or file extension to be a real path
   if (!/[/\\.]/.test(p)) return false
+  // Reject Claude SDK internal paths (memory, project config)
+  if (/\.claude\/projects\//.test(p)) return false
   return true
 }
 
