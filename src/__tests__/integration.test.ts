@@ -55,8 +55,8 @@ mock.module("../mcpTools", () => ({
 }))
 
 const { createProxyServer } = await import("../proxy/server")
-const { updateProxySettings } = await import("../keys/settings")
-updateProxySettings({ passthrough: false })  // Integration tests use non-passthrough mode
+const { setSettingsForTesting } = await import("../keys/settings")
+setSettingsForTesting({ passthrough: false })  // In-memory only, does not overwrite disk settings
 
 
 // Use Hono's built-in test client

@@ -58,6 +58,11 @@ function flush(): void {
   writeFileSync(filePath, JSON.stringify(settings, null, 2))
 }
 
+/** Override settings in-memory without flushing to disk — for testing only. */
+export function setSettingsForTesting(overrides: Partial<ProxySettings>): void {
+  Object.assign(settings, overrides)
+}
+
 export function getProxySettings(): ProxySettings {
   return { ...settings }
 }
