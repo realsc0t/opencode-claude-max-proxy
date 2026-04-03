@@ -18,6 +18,7 @@ import { MODEL_CATALOG } from "../proxy/openai"
 import { getProxySettings, updateProxySettings } from "./settings"
 import { createTelemetryRoutes } from "../telemetry"
 import { isAdminConfigured, verifyMasterKey, generateJwt, verifyJwt } from "./auth"
+import { createConnectorRoutes } from "../connectors"
 
 export function createAdminRoutes() {
   const routes = new Hono()
@@ -144,6 +145,9 @@ export function createAdminRoutes() {
       limitWeekly: key.limits?.limitWeekly || 0,
     })
   })
+
+  // Connector management routes
+  routes.route("/connectors", createConnectorRoutes())
 
   return routes
 }

@@ -100,6 +100,7 @@ export const adminDashboardHtml = `<!DOCTYPE html>
   <div style="display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid var(--border)">
     <div class="admin-tab active" data-tab="keys" onclick="switchAdminTab('keys')" style="padding:10px 20px;font-size:13px;font-weight:500;color:var(--accent);cursor:pointer;border-bottom:2px solid var(--accent);margin-bottom:-1px">Keys &amp; Settings</div>
     <div class="admin-tab" data-tab="telemetry" onclick="switchAdminTab('telemetry')" style="padding:10px 20px;font-size:13px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px">Telemetry</div>
+    <div class="admin-tab" data-tab="config" onclick="switchAdminTab('config')" style="padding:10px 20px;font-size:13px;font-weight:500;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px">Configuration</div>
   </div>
 
   <div id="tab-keys">
@@ -206,6 +207,41 @@ export const adminDashboardHtml = `<!DOCTYPE html>
     <div id="tel-requests"></div>
   </div><!-- end tab-telemetry -->
 
+  <div id="tab-config" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="font-size:16px">Connectors</h2>
+      <button class="btn-primary" onclick="showAddConnector()">+ Add Connector</button>
+    </div>
+
+    <div id="add-connector-form" style="display:none;margin-bottom:16px;padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Type</label>
+          <select id="new-conn-type" style="padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px">
+            <option value="openai">OpenAI API</option>
+            <option value="anthropic">Anthropic API</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Name</label>
+          <input type="text" id="new-conn-name" placeholder="e.g. OpenAI Production" style="padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;width:200px">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Base URL</label>
+          <input type="text" id="new-conn-url" placeholder="https://api.openai.com" style="padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;width:280px">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">API Key</label>
+          <input type="password" id="new-conn-key" placeholder="sk-..." style="padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;width:280px">
+        </div>
+        <button class="btn-primary btn-sm" onclick="createConnector()">Create</button>
+        <button class="btn-ghost btn-sm" onclick="hideAddConnector()">Cancel</button>
+      </div>
+    </div>
+
+    <div id="connectors-list"></div>
+  </div><!-- end tab-config -->
+
 </div>
 
 <div class="toast" id="toast"></div>
@@ -250,7 +286,9 @@ function switchAdminTab(tab) {
   });
   $('#tab-keys').style.display = tab === 'keys' ? '' : 'none';
   $('#tab-telemetry').style.display = tab === 'telemetry' ? '' : 'none';
+  $('#tab-config').style.display = tab === 'config' ? '' : 'none';
   if (tab === 'telemetry') loadTelemetry();
+  if (tab === 'config') loadConnectors();
 }
 
 function showApp() {
@@ -727,6 +765,120 @@ async function deleteKey(id, name) {
     await api('DELETE', '/keys/' + id);
     toast('Key deleted');
     loadKeys();
+  } catch (e) { toast(e.message, true); }
+}
+
+// === Connector Management ===
+function showAddConnector() { $('#add-connector-form').style.display = ''; }
+function hideAddConnector() { $('#add-connector-form').style.display = 'none'; }
+
+async function createConnector() {
+  const type = $('#new-conn-type').value;
+  const name = $('#new-conn-name').value.trim();
+  const baseUrl = $('#new-conn-url').value.trim();
+  const apiKey = $('#new-conn-key').value.trim();
+  if (!name) { toast('Name is required', true); return; }
+  if (!baseUrl) { toast('Base URL is required', true); return; }
+  if (!apiKey) { toast('API Key is required', true); return; }
+  try {
+    await api('POST', '/connectors', { type, name, baseUrl, apiKey });
+    toast('Connector created');
+    hideAddConnector();
+    $('#new-conn-name').value = '';
+    $('#new-conn-url').value = '';
+    $('#new-conn-key').value = '';
+    loadConnectors();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadConnectors() {
+  try {
+    const connectors = await api('GET', '/connectors');
+    let html = '';
+    for (const c of connectors) {
+      const badge = c.enabled
+        ? '<span class="badge badge-green">Active</span>'
+        : '<span class="badge badge-red">Disabled</span>';
+      const typeLabel = c.type === 'claude-sdk' ? 'Claude Max (SDK)' : c.type === 'openai' ? 'OpenAI API' : 'Anthropic API';
+      const typeColor = c.type === 'claude-sdk' ? 'var(--accent)' : c.type === 'openai' ? 'var(--green)' : 'var(--yellow)';
+      const enabledModels = (c.models || []).filter(m => m.enabled).length;
+      const totalModels = (c.models || []).length;
+
+      html += '<div style="margin-bottom:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden">';
+      html += '<div style="padding:14px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">';
+      html += '<div style="display:flex;align-items:center;gap:10px">';
+      html += '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:' + typeColor + '20;color:' + typeColor + ';font-weight:600;text-transform:uppercase">' + esc(c.type) + '</span>';
+      html += '<strong>' + esc(c.name) + '</strong> ' + badge;
+      html += ' <span style="font-size:12px;color:var(--muted)">' + enabledModels + '/' + totalModels + ' models</span>';
+      if (c.baseUrl) html += ' <span class="mono" style="font-size:11px;color:var(--muted)">' + esc(c.baseUrl) + '</span>';
+      html += '</div>';
+      html += '<div style="display:flex;gap:6px">';
+      if (c.type !== 'claude-sdk') {
+        html += '<button class="btn-ghost btn-sm" onclick="fetchModels(\'' + c.id + '\')">Fetch Models</button>';
+        html += '<button class="btn-ghost btn-sm" onclick="toggleConnector(\'' + c.id + '\',' + !c.enabled + ')">' + (c.enabled ? 'Disable' : 'Enable') + '</button>';
+        html += '<button class="btn-danger btn-sm" onclick="deleteConnector(\'' + c.id + '\',\'' + esc(c.name) + '\')">Delete</button>';
+      }
+      html += '</div></div>';
+
+      // Model list
+      if (c.models && c.models.length > 0) {
+        html += '<div style="padding:0 16px 14px;display:flex;flex-wrap:wrap;gap:6px">';
+        for (const m of c.models) {
+          const mColor = m.enabled ? 'var(--green)' : 'var(--muted)';
+          const mBg = m.enabled ? 'rgba(63,185,80,0.1)' : 'var(--bg)';
+          const ctx = m.contextWindow ? (m.contextWindow >= 1000000 ? (m.contextWindow/1000000) + 'M' : (m.contextWindow/1000) + 'K') : '';
+          html += '<label style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:' + mBg + ';border:1px solid ' + (m.enabled ? 'var(--green)' : 'var(--border)') + ';border-radius:4px;cursor:pointer;font-size:12px;color:' + mColor + '">';
+          html += '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleConnModel(\'' + c.id + '\',\'' + esc(m.id) + '\',this.checked)" style="width:12px;height:12px">';
+          html += esc(m.name || m.id);
+          if (ctx) html += ' <span style="color:var(--muted);font-size:10px">(' + ctx + ')</span>';
+          html += '</label>';
+        }
+        html += '</div>';
+      } else if (c.type !== 'claude-sdk') {
+        html += '<div style="padding:0 16px 14px;color:var(--muted);font-size:12px">No models loaded — click Fetch Models to discover available models</div>';
+      }
+
+      if (c.modelsLastFetched) {
+        html += '<div style="padding:0 16px 10px;font-size:10px;color:var(--muted)">Models last fetched: ' + ago(c.modelsLastFetched) + '</div>';
+      }
+      html += '</div>';
+    }
+    $('#connectors-list').innerHTML = html;
+  } catch (e) {
+    $('#connectors-list').innerHTML = '<div class="empty">Failed to load connectors</div>';
+    toast(e.message, true);
+  }
+}
+
+async function fetchModels(id) {
+  try {
+    toast('Fetching models...');
+    await api('POST', '/connectors/' + id + '/fetch-models');
+    toast('Models updated');
+    loadConnectors();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function toggleConnModel(connId, modelId, enabled) {
+  try {
+    await api('PATCH', '/connectors/' + connId + '/models/' + encodeURIComponent(modelId), { enabled });
+  } catch (e) { toast(e.message, true); loadConnectors(); }
+}
+
+async function toggleConnector(id, enabled) {
+  try {
+    await api('PATCH', '/connectors/' + id, { enabled });
+    toast(enabled ? 'Connector enabled' : 'Connector disabled');
+    loadConnectors();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteConnector(id, name) {
+  if (!confirm('Delete connector "' + name + '"? This cannot be undone.')) return;
+  try {
+    await api('DELETE', '/connectors/' + id);
+    toast('Connector deleted');
+    loadConnectors();
   } catch (e) { toast(e.message, true); }
 }
 </script>
