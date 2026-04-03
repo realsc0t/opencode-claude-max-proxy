@@ -213,16 +213,18 @@ export function extractFileChangesFromMessages(
 export function formatFileChangeSummary(changes: FileChange[]): string | undefined {
   if (changes.length === 0) return undefined
 
-  // Deduplicate: same path+operation only listed once
+  // Deduplicate and filter: same path+operation only listed once, reject non-paths
   const seen = new Set<string>()
   const unique: FileChange[] = []
   for (const c of changes) {
+    if (!isPlausiblePath(c.path)) continue
     const key = `${c.operation}:${c.path}`
     if (!seen.has(key)) {
       seen.add(key)
       unique.push(c)
     }
   }
+  if (unique.length === 0) return undefined
 
   const lines = unique.map((c) => `- ${c.operation} ${c.path}`)
   return `\n\nFiles changed:\n${lines.join("\n")}`
