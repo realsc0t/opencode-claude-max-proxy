@@ -526,7 +526,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         ? adapterPassthrough
         : getProxySettings().passthrough
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
-        console.error(`[PASSTHROUGH DEBUG] passthrough=${passthrough} adapterPassthrough=${adapterPassthrough} settingsPassthrough=${getProxySettings().passthrough} tools=${body.tools?.length ?? 0} adapter=${adapter.name} workDir=${workingDirectory}`)
       const fileChanges: FileChange[] = []
 
       // In passthrough mode, register OpenCode's tools as MCP tools so Claude
